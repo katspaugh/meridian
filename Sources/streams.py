@@ -423,7 +423,8 @@ def streams():
             entries.append(dict(id=tid, title=title, provider=provider, state=state, detail=detail,
                                 live=tid in live, terminalSocket=str(TERMINALS / tid) if tid in attached else None,
                                 session=sid, nativeView=bool(sid and (ROOT/"views"/sid).is_dir()),
-                                agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])]))
+                                agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])
+                                        if a['state'] in ('Working', 'Needs you')]))
         # An idle shell does not mask finished agent work. A working agent does.
         priority = {"Needs you": 0, "Working": 1, "Review": 2, "Ready": 3, "Queued": 4, "Offline": 5}
         representative = min(entries, key=lambda t: priority.get(t['state'], 6)) if entries else dict(state='Ready', detail='Add a terminal to continue this workstream.')

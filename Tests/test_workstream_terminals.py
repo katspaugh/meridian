@@ -181,6 +181,7 @@ class WorkstreamTerminalsTests(unittest.TestCase):
 
     def test_links_and_subagents_remain_associated_with_the_workstream(self):
         key = self.register()
+        self.live.add(key)
         url = "https://github.com/example/project/pull/12"
         with streams.database() as db:
             streams.links.collect(db, key, url)
@@ -189,7 +190,47 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         row = streams.streams()[0]
         self.assertEqual([link['url'] for link in row['links']], [url])
         self.assertEqual(row['agents'][0]['terminalID'], key)
-        self.assertEqual(row['agents'][0]['state'], 'Offline')
+        self.assertEqual(row['agents'][0]['state'], 'Working')
+
+    def test_only_active_subagents_are_listed_for_each_provider(self):
+        for provider in ('codex', 'claude'):
+            with self.subTest(provider=provider):
+                key = self.register(key='term-' + provider, provider=provider)
+                self.live.add(key)
+                states = ('Working', 'Needs you', 'Finished', 'Offline', 'Ready', 'Recorded')
+                with streams.database() as db:
+                    for state in states:
+                        if provider == 'codex':
+                            db.execute('INSERT INTO codex_children VALUES (?,?,?,?,?)',
+                                       (key, state, state, 'Agent', state))
+                        else:
+                            db.execute('INSERT INTO agents VALUES (?,?,?,?,?,?,?)',
+                                       (key, 'extra-session', state, 'Agent', state, None, None))
+                    if provider == 'claude':
+                        db.execute('INSERT INTO agents VALUES (?,?,?,?,?,?,?)',
+                                   (key, 'old-session', 'stale', 'Agent', 'Working', None, None))
+                row = streams.streams()[0]
+                terminal = next(t for t in row['terminals'] if t['id'] == key)
+                self.assertCountEqual([a['state'] for a in terminal['agents']], ['Working', 'Needs you'])
+                self.assertEqual([a for a in row['agents'] if a['terminalID'] == key], terminal['agents'])
+                self.live.remove(key)
+                self.assertFalse([a for a in streams.streams()[0]['agents'] if a['terminalID'] == key])
+
+    def test_finished_claude_agent_disappears_but_retains_its_response(self):
+        key = self.register(provider='claude')
+        self.live.add(key)
+        with streams.database() as db:
+            streams.subagents.record(db, key, 'extra-session',
+                                     dict(agent_id='child', hook_event_name='SubagentStart'))
+        self.assertEqual(len(streams.streams()[0]['agents']), 1)
+        with streams.database() as db:
+            streams.subagents.record(db, key, 'extra-session',
+                                     dict(agent_id='child', hook_event_name='SubagentStop',
+                                          last_assistant_message='Done'))
+        self.assertEqual(streams.streams()[0]['agents'], [])
+        with streams.database() as db:
+            self.assertEqual(streams.subagents.messages(db, key, 'extra-session/child'),
+                             [dict(label='Response', text='Done')])
 
     def test_add_persists_unique_ids_and_numbered_names(self):
         with patch.object(streams, 'launch'):
