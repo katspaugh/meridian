@@ -24,7 +24,9 @@ Press **⌘N**, choose a working folder, and click **Create**. Give Claude a tas
 
 - **Switch away while Claude works.** Each session runs in its own PTY. Switch streams or quit Muxteroid and the Claude process keeps running. After a reboot, Muxteroid can resume from Claude's saved conversation.
 - **See what's waiting on you.** Permission requests, questions, and errors appear under **Needs you**. Allow notifications at launch to get a macOS alert when a workstream or subagent needs input. Click it to return to the workstream. Alerts run while Muxteroid is open, including in the background. Completed turns appear under **Ready for review**, with Claude's formatted reply in the inspector. You decide when to mark the workstream complete.
-- **Inspect delegated work.** Expand a workstream in the sidebar to see its Claude subagents. Select one to read its assignment, tool activity, and responses, then select the parent to return to its terminal.
+- **Inspect delegated work.** Expand a workstream in the sidebar to see its Claude subagents. Select a subagent to switch the embedded terminal to Claude Code’s own agent view. Select the parent to return to the conversation. This requires Claude Code 2.1.300 or later and a workstream terminal started with this version of Muxteroid. Older sessions and agents Claude has unloaded open as transcript snapshots in a terminal pager.
+
+  Muxteroid loads a local Claude mod in each workstream. On first use it creates a Claude Chat shortcut (`ctrl+x ctrl+y` → `command:muxteroid-view`) if no keybindings file exists. If you already have a keybindings file, add that binding to its Chat section or run `/muxteroid-view` after selecting an agent.
 - **Follow the plan.** Claude uses [Beads](https://github.com/gastownhall/beads) to track subtasks, dependencies, and blockers under the workstream. The inspector shows progress. Press **⌥⌘I** to give the terminal the full width.
 - **Jump to related work.** The bottom bar collects GitHub PRs and Linear issues from Claude's activity. The links stay with the stream when you reopen it.
 

@@ -20,6 +20,7 @@ import uuid
 sys.dont_write_bytecode = True
 import workstream_links as links
 import subagents
+import agent_navigation
 
 ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -172,7 +173,9 @@ def streams():
         runtime = {}
         agents = {}
         folders = {i['id']: (i.get('metadata') or {}).get('folder') for i in issues}
+        sessions = {}
         for key, sid, state, detail, transcript in db.execute("SELECT id,session,state,detail,transcript FROM activity"):
+            sessions[key] = sid
             agents[key] = subagents.discover(db, key, sid, transcript, key in live)
             runtime[key] = state, detail
             links.backfill(db, key, transcript, folders.get(key))
@@ -199,7 +202,7 @@ def streams():
         elif key in runtime and key not in live and state != "Review":
             state, detail = "Offline", "Open the terminal to continue this stream."
         rows.append(dict(id=key, title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
-                         reference=issue.get("external_ref") or "", state=state, detail=detail, live=key in live, tasks=children.get(key, []), links=artifacts.get(key, []), agents=agents.get(key, [])))
+                         reference=issue.get("external_ref") or "", state=state, detail=detail, live=key in live, tasks=children.get(key, []), links=artifacts.get(key, []), agents=agents.get(key, []), session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
     return rows
 
 
@@ -223,6 +226,18 @@ def launch(key):
             raise ValueError("Install dtach with brew install dtach to start the terminal.")
         env = dict(os.environ, TERM="xterm-256color", TERM_PROGRAM="ghostty", COLORTERM="truecolor",
                    BEADS_DIR=str(ROOT/".beads"), MUXTEROID_HOME=str(ROOT), MUXTEROID_ISSUE=key)
+        view_dir = ROOT / "views" / sid
+        view_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        env["MUXTEROID_VIEW_DIR"] = str(view_dir)
+        # Claude generates type definitions in the plugin directory at runtime.
+        # Keep that writable directory outside the signed application bundle.
+        source = Path(__file__).with_name("agent-view")
+        plugin = view_dir / "plugin"
+        for relative in (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.js"):
+            target = plugin / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source / relative, target)
+        args.extend(["--plugin-dir", str(plugin)])
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
         run(["dtach", "-n", str(TERMINALS / key), "-r", "winch", *args],
@@ -252,9 +267,26 @@ def attach_terminal(path):
 def main(action, *args):
     if action == "hook":
         return hook(*args)
-    if action == "agent-messages":
+    if action == "view-agent":
+        key, identity = args
+        if Path(key).name != key:
+            raise ValueError("Invalid workstream ID.")
         with database() as db:
-            print(json.dumps(subagents.messages(db, *args)))
+            print(agent_navigation.switch(db, ROOT, terminal_directory() / key, key, identity))
+        return
+    if action == "agent-archive":
+        with database() as db:
+            entries = subagents.messages(db, *args)
+        import tempfile
+        with tempfile.TemporaryFile(mode="w+") as transcript:
+            transcript.write("Saved subagent transcript · snapshot\n\n")
+            for entry in entries:
+                clean = "".join(c for c in entry["text"] if c in "\n\t" or c.isprintable())
+                transcript.write(entry["label"] + "\n" + clean + "\n\n")
+            if not entries:
+                transcript.write("No messages were recorded.")
+            transcript.seek(0)
+            subprocess.run(["/usr/bin/less", "-+F"], stdin=transcript, env=dict(os.environ, LESSSECURE="1"))
         return
     if action == "link":
         key, url = args

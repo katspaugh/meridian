@@ -2,6 +2,10 @@ import SwiftUI
 import AppKit
 import GhosttyTerminal
 
+struct Subagent: Decodable, Identifiable {
+    let id, title, role, state, revision: String
+}
+
 struct BeadsTask: Decodable, Identifiable {
     let id, title, status: String
 }
@@ -16,7 +20,8 @@ struct Stream: Decodable, Identifiable {
     let agents: [Subagent]
     let tasks: [BeadsTask]
     let links: [WorkstreamLink]
-    let live: Bool
+    let session: String?
+    let live, nativeView: Bool
     let id, title, folder, reference, state, detail, created: String
 }
 
@@ -108,15 +113,18 @@ enum Bridge {
 struct StreamTerminal: View {
     @StateObject private var terminal: TerminalViewState
     @State private var disconnected = false
+    let focusRequest: UUID?
 
-    init(streamID: String, appearance: String) {
-        _terminal = StateObject(wrappedValue: Self.makeTerminal(streamID, appearance))
+    init(streamID: String, appearance: String, archive: String? = nil, focusRequest: UUID? = nil) {
+        self.focusRequest = focusRequest
+        _terminal = StateObject(wrappedValue: Self.makeTerminal(streamID, appearance, archive))
     }
 
-    private static func makeTerminal(_ streamID: String, _ appearance: String) -> TerminalViewState {
+    private static func makeTerminal(_ streamID: String, _ appearance: String, _ archive: String?) -> TerminalViewState {
         let state = TerminalViewState(controller: TerminalController(configSource: .generated(appearance), theme: TerminalTheme()))
         let bridge = Bundle.main.url(forResource: "streams", withExtension: "py")!
-        let command = ["/usr/bin/python3", bridge.path, "attach", streamID]
+        let arguments = archive.map { ["agent-archive", streamID, $0] } ?? ["attach", streamID]
+        let command = (["/usr/bin/python3", bridge.path] + arguments)
             .map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
             .joined(separator: " ")
         state.configuration = TerminalSurfaceOptions(command: command, waitAfterCommand: false)
@@ -134,6 +142,7 @@ struct StreamTerminal: View {
                         terminal.onClose = { _ in disconnected = true }
                         terminal.requestFocus()
                     }
+                    .onChange(of: focusRequest) { terminal.requestFocus() }
                     .onDisappear { terminal.onClose = nil }
             }
         }
@@ -147,6 +156,9 @@ struct Dashboard: View {
     @State private var adding = false
     @State private var selection: String?
     @State private var agentSelection: String?
+    @State private var archivedAgent: String?
+    @State private var switching = false
+    @State private var terminalFocus = UUID()
     @State private var expandedStreams: Set<String> = []
     @State private var appearance: String?
     @AppStorage("inspectorVisible") private var inspectorVisible = true
@@ -160,8 +172,7 @@ struct Dashboard: View {
 
     private func sidebarRow(_ stream: Stream) -> some View {
         Button {
-            selection = stream.id
-            agentSelection = nil
+            selectTerminal(stream, agent: nil)
         } label: {
             HStack {
                 Circle().fill(stateColor(stream.state)).frame(width: 7, height: 7)
@@ -170,7 +181,7 @@ struct Dashboard: View {
             }
             .padding(.vertical, 3).contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).disabled(switching)
         .listRowBackground(selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
         .help(stream.title + " · " + stream.state)
     }
@@ -185,8 +196,7 @@ struct Dashboard: View {
             )) {
                 ForEach(stream.agents) { agent in
                     Button {
-                        selection = stream.id
-                        agentSelection = agent.id
+                        selectTerminal(stream, agent: agent)
                     } label: {
                         HStack {
                             Image(systemName: "point.3.connected.trianglepath.dotted").foregroundStyle(stateColor(agent.state))
@@ -194,11 +204,43 @@ struct Dashboard: View {
                             Spacer(minLength: 0)
                         }.contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).disabled(switching)
                     .help(agent.title + " · " + agent.state)
                     .listRowBackground(selection == stream.id && agentSelection == agent.id ? Color.accentColor.opacity(0.16) : Color.clear)
                 }
             } label: { sidebarRow(stream) }
+        }
+    }
+
+    private func selectTerminal(_ stream: Stream, agent: Subagent?) {
+        guard !switching else { return }
+        terminalFocus = UUID()
+        let previousStream = selection
+        selection = stream.id
+        archivedAgent = nil
+        if previousStream != stream.id { agentSelection = nil }
+        if let agent, !stream.nativeView || !stream.live || stream.state == "Done" || !agent.id.hasPrefix((stream.session ?? "") + "/") {
+            archivedAgent = agent.id
+            agentSelection = agent.id
+            return
+        }
+        if agent == nil && (!stream.live || !stream.nativeView || stream.agents.isEmpty || stream.state == "Done") {
+            agentSelection = nil
+            return
+        }
+        switching = true
+        Task {
+            defer { switching = false }
+            do {
+                let result = try await Bridge.run(["view-agent", stream.id, agent?.id ?? ""])
+                guard selection == stream.id else { return }
+                agentSelection = agent?.id
+                if String(decoding: result, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "archive" {
+                    archivedAgent = agent?.id
+                }
+            } catch {
+                store.error = error.localizedDescription
+            }
         }
     }
 
@@ -230,11 +272,11 @@ struct Dashboard: View {
                 if let stream = selected {
                     HSplitView {
                         Group {
-                            if let agent = stream.agents.first(where: { $0.id == agentSelection }) {
-                                SubagentDetail(streamID: stream.id, agent: agent) { agentSelection = nil }.id(agent.id)
+                            if let archivedAgent, archivedAgent == agentSelection, let appearance {
+                                StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent).id(archivedAgent)
                             } else if stream.live && stream.state != "Done" {
                                 if let appearance {
-                                    StreamTerminal(streamID: stream.id, appearance: appearance).id(stream.id)
+                                    StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus).id(stream.id)
                                 } else { ProgressView() }
                             } else if stream.state == "Done" {
                                 Label("Completed", systemImage: "checkmark.circle")
@@ -306,9 +348,8 @@ struct Dashboard: View {
     private func selectNotification() {
         guard let id = notifications.destination,
               let stream = store.rows.first(where: { $0.id == id }) else { return }
-        selection = id
+        selectTerminal(stream, agent: nil)
         expanded.insert(stream.state == "Done" ? .done : .active)
-        agentSelection = nil
         notifications.destination = nil
     }
 
