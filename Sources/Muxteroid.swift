@@ -277,6 +277,7 @@ struct Dashboard: View {
     @State private var appearance: String?
     @AppStorage("inspectorVisible") private var inspectorVisible = true
     @AppStorage("lastWorkstreamFolder") private var lastFolder = ""
+    @AppStorage("recentWorkstreamFolders") private var recentFoldersJSON = "[]"
 
     private var selected: Stream? { store.rows.first { $0.id == selection } }
     private func selectedTerminal(_ stream: Stream) -> WorkstreamTerminal? {
@@ -289,9 +290,18 @@ struct Dashboard: View {
         choices[stream.id] = terminalID
         if let data = try? JSONEncoder().encode(choices) { terminalSelections = String(decoding: data, as: UTF8.self) }
     }
-    private var suggestedFolder: String {
-        ([lastFolder] + store.rows.sorted { $0.created > $1.created }.map { $0.sourceFolder ?? $0.folder })
-            .first { FileManager.default.fileExists(atPath: $0) } ?? ""
+    private var recentFolders: [String] {
+        let saved = (try? JSONDecoder().decode([String].self, from: Data(recentFoldersJSON.utf8))) ?? []
+        let candidates = [lastFolder] + saved + store.rows.sorted { $0.created > $1.created }.map { $0.sourceFolder ?? $0.folder }
+        var seen = Set<String>()
+        return Array(candidates.compactMap { candidate -> String? in
+            guard !candidate.isEmpty else { return nil }
+            let path = URL(fileURLWithPath: (candidate as NSString).expandingTildeInPath).standardizedFileURL.path
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                  isDirectory.boolValue, seen.insert(path).inserted else { return nil }
+            return path
+        }.prefix(8))
     }
 
     private func sidebarRow(_ stream: Stream) -> some View {
@@ -573,8 +583,11 @@ struct Dashboard: View {
             }
         }
         .sheet(isPresented: $adding) {
-            NewStream(store: store, folder: suggestedFolder) { id, folder in
+            NewStream(store: store, folder: recentFolders.first ?? "", recentFolders: recentFolders) { id, folder in
                 lastFolder = folder
+                if let data = try? JSONEncoder().encode(recentFolders) {
+                    recentFoldersJSON = String(decoding: data, as: UTF8.self)
+                }
                 showingBoard = false
                 selection = id
                 agentSelection = nil
@@ -649,6 +662,7 @@ struct NewStream: View {
     @ObservedObject var store: Store
     @Environment(\.dismiss) var dismiss
     @State var folder: String
+    var recentFolders: [String]
     var created: (String, String) -> Void
     @State private var reference = ""
     @AppStorage("newStreamProvider") private var provider = "claude"
@@ -667,6 +681,41 @@ struct NewStream: View {
                     panel.canChooseDirectories = true
                     panel.canChooseFiles = false
                     if panel.runModal() == .OK { folder = panel.url?.path ?? "" }
+                }
+            }
+            if !recentFolders.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recent folders").font(.caption).foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(recentFolders, id: \.self) { path in
+                                Button {
+                                    folder = path
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "folder").foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(URL(fileURLWithPath: path).lastPathComponent)
+                                                .font(.callout).lineLimit(1)
+                                            Text((path as NSString).abbreviatingWithTildeInPath)
+                                                .font(.caption).foregroundStyle(.secondary)
+                                                .lineLimit(1).truncationMode(.middle)
+                                        }
+                                        Spacer(minLength: 0)
+                                        if folder == path {
+                                            Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                                        }
+                                    }
+                                    .padding(6).contentShape(Rectangle())
+                                    .background(folder == path ? Color.accentColor.opacity(0.1) : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 6))
+                                }
+                                .buttonStyle(.plain).help(path)
+                                .accessibilityLabel("Use folder \(path)")
+                            }
+                        }
+                    }
+                    .frame(height: CGFloat(min(recentFolders.count, 4)) * 48)
                 }
             }
             Text("Git repositories get a new branch and worktree shared by all terminals. Other folders are used directly.")

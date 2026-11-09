@@ -20,6 +20,8 @@ open build/Muxteroid.app
 
 Press **⌘N**, choose your agent and working folder, and click **Create**. Give the agent a task in the terminal. It names the stream from the goal and updates the title as the work becomes clearer. A Linear reference is optional.
 
+The folder field starts with your last used folder. Below it, **Recent folders** lists up to eight project folders, most recent first; click one to select it. The list is remembered across launches and skips folders that no longer exist.
+
 For Git repositories, creating a workstream automatically creates a fresh `muxteroid/<id>` branch and worktree from the selected checkout’s current commit. A selected subfolder is preserved. Uncommitted changes stay in the original checkout. Both agents and any extra terminals share this one worktree. Folders outside Git are used directly; existing workstreams retain their current folders.
 
 ## Working across streams
