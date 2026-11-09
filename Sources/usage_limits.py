@@ -46,7 +46,8 @@ def claude_live():
                "request": {"subtype": "get_usage", "skip_behaviors": True}}
     proc = subprocess.run(
         ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-         "--verbose", "--no-session-persistence", "--safe-mode", "--strict-mcp-config"],
+         "--verbose", "--no-session-persistence", "--setting-sources", "user",
+         "--settings", '{"disableAllHooks":true}', "--strict-mcp-config"],
         input=json.dumps(request) + "\n", cwd="/", stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True, timeout=12, check=True)
     for line in proc.stdout.splitlines():
@@ -60,26 +61,10 @@ def claude_live():
         windows = claude_windows(data.get("rate_limits") or {})
         if windows:
             return dict(windows=windows, measured=time.time())
-        if data.get("rate_limits_available") is False:
-            # auth status returns exit code 1 as well as JSON when signed out.
-            auth = subprocess.run(["claude", "auth", "status", "--json"], cwd="/",
-                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
-            if json.loads(auth.stdout).get("loggedIn") is False:
-                return dict(windows=[], status="Sign in", hint="Run claude auth login in Terminal, then refresh usage.")
-            return dict(windows=[], status="No quota", hint="Claude does not report subscription usage windows for this sign-in.")
     return None
 
 
-def claude(root):
-    try:
-        live = claude_live()
-        if live is not None:
-            return live
-    except FileNotFoundError:
-        return dict(windows=[], status="Not installed", hint="Install Claude Code to see account usage.")
-    except (OSError, ValueError, subprocess.SubprocessError):
-        pass
-
+def claude_cached(root):
     snapshots = []
     config_dir = Path(os.getenv("CLAUDE_CONFIG_DIR") or Path.home()/".claude")
     config = read(config_dir/".claude.json") or read(Path.home()/".claude.json")
@@ -100,7 +85,22 @@ def claude(root):
         windows = [w for w in windows if w]
         if windows and time.time()-stamp < 3600:
             return dict(windows=sorted(windows,key=lambda w:w["label"]), measured=stamp)
-    return dict(windows=[], status="Unavailable", hint="Claude returned no recent usage reading. Check /usage in Claude Code, then refresh.")
+    return None
+
+
+def claude(root):
+    # A separate CLI process may have a different account context from the
+    # interactive workstream. Prefer recent readings from Claude itself.
+    cached = claude_cached(root)
+    if cached:
+        return cached
+    try:
+        live = claude_live()
+        if live:
+            return live
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return dict(windows=[], hint="No recent usage figures from Claude Code.")
 
 
 def codex():
