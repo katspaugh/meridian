@@ -302,11 +302,11 @@ struct Dashboard: View {
                     ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
                         AgentIcon(provider: provider)
                             .background(.background, in: Circle())
-                            .offset(x: CGFloat(index) * 6)
+                            .offset(x: -CGFloat(index) * 6)
                             .zIndex(-Double(index))
                     }
                 }
-                .frame(width: 16 + CGFloat(providers.count - 1) * 6, height: 16, alignment: .leading)
+                .frame(width: 16, height: 16, alignment: .leading)
                 Text(stream.title).lineLimit(2)
                 Spacer(minLength: 0)
                 Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
