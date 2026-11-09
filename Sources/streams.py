@@ -19,6 +19,7 @@ import uuid
 # The bridge runs inside the signed app bundle.
 sys.dont_write_bytecode = True
 import workstream_links as links
+import subagents
 
 ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -46,6 +47,7 @@ def database():
     db = sqlite3.connect(ROOT/"activity.sqlite", timeout=10)
     db.execute("CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, session TEXT, state TEXT, detail TEXT, transcript TEXT)")
     links.initialize(db)
+    subagents.initialize(db)
     return db
 
 
@@ -84,6 +86,8 @@ def hook(key, sid):
             links.tool_result(db, key, event.get("tool_name", ""), event.get("tool_input", {}),
                               event.get("tool_response", ""), event.get("cwd"), live=True)
     if event.get("agent_id"):
+        with database() as db:
+            subagents.record(db, key, sid, event)
         return
     name = event["hook_event_name"]
     tool = event.get("tool_name", "")
@@ -112,7 +116,7 @@ def settings(key, sid):
     command = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook", key, sid])
     hooks = {}
     for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "Notification",
-                  "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure"):
+                  "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure", "SubagentStart", "SubagentStop"):
         item = {"hooks": [{"type": "command", "command": command}]}
         if event == "PreToolUse":
             item["matcher"] = "AskUserQuestion|ExitPlanMode"
@@ -166,8 +170,10 @@ def streams():
     live = terminals() | legacy_sessions()
     with database() as db:
         runtime = {}
+        agents = {}
         folders = {i['id']: (i.get('metadata') or {}).get('folder') for i in issues}
-        for key, state, detail, transcript in db.execute("SELECT id,state,detail,transcript FROM activity"):
+        for key, sid, state, detail, transcript in db.execute("SELECT id,session,state,detail,transcript FROM activity"):
+            agents[key] = subagents.discover(db, key, sid, transcript, key in live)
             runtime[key] = state, detail
             links.backfill(db, key, transcript, folders.get(key))
         for issue in issues:
@@ -193,7 +199,7 @@ def streams():
         elif key in runtime and key not in live and state != "Review":
             state, detail = "Offline", "Open the terminal to continue this stream."
         rows.append(dict(id=key, title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
-                         reference=issue.get("external_ref") or "", state=state, detail=detail, live=key in live, tasks=children.get(key, []), links=artifacts.get(key, [])))
+                         reference=issue.get("external_ref") or "", state=state, detail=detail, live=key in live, tasks=children.get(key, []), links=artifacts.get(key, []), agents=agents.get(key, [])))
     return rows
 
 
@@ -246,6 +252,10 @@ def attach_terminal(path):
 def main(action, *args):
     if action == "hook":
         return hook(*args)
+    if action == "agent-messages":
+        with database() as db:
+            print(json.dumps(subagents.messages(db, *args)))
+        return
     if action == "link":
         key, url = args
         if not (links.PR.search(url) or links.LINEAR.search(url)):

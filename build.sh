@@ -9,7 +9,7 @@ cp "$bin/Muxteroid" "$contents/MacOS/"
 for bundle in "$bin"/*.bundle; do
     cp -R "$bundle" "$contents/Resources/"
 done
-cp Sources/streams.py Sources/workstream_links.py "$contents/Resources/"
+cp Sources/streams.py Sources/workstream_links.py Sources/subagents.py "$contents/Resources/"
 cp Assets/Muxteroid.icns "$contents/Resources/"
 cat > "$contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

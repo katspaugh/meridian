@@ -13,6 +13,7 @@ struct WorkstreamLink: Decodable, Identifiable {
 }
 
 struct Stream: Decodable, Identifiable {
+    let agents: [Subagent]
     let tasks: [BeadsTask]
     let links: [WorkstreamLink]
     let live: Bool
@@ -24,7 +25,7 @@ func stateColor(_ state: String) -> Color {
     case "Needs you": return .orange
     case "Review": return .purple
     case "Working": return .blue
-    case "Done": return .green
+    case "Finished", "Done": return .green
     default: return .secondary
     }
 }
@@ -144,6 +145,8 @@ struct Dashboard: View {
     @State private var expanded: Set<Inbox> = [.active]
     @State private var adding = false
     @State private var selection: String?
+    @State private var agentSelection: String?
+    @State private var expandedStreams: Set<String> = []
     @State private var appearance: String?
     @AppStorage("inspectorVisible") private var inspectorVisible = true
     @AppStorage("lastWorkstreamFolder") private var lastFolder = ""
@@ -157,6 +160,7 @@ struct Dashboard: View {
     private func sidebarRow(_ stream: Stream) -> some View {
         Button {
             selection = stream.id
+            agentSelection = nil
         } label: {
             HStack {
                 Circle().fill(stateColor(stream.state)).frame(width: 7, height: 7)
@@ -166,8 +170,35 @@ struct Dashboard: View {
             .padding(.vertical, 3).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .listRowBackground(selection == stream.id ? Color.accentColor.opacity(0.16) : Color.clear)
+        .listRowBackground(selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
         .help(stream.title + " · " + stream.state)
+    }
+
+    @ViewBuilder private func streamBranch(_ stream: Stream) -> some View {
+        if stream.agents.isEmpty {
+            sidebarRow(stream)
+        } else {
+            DisclosureGroup(isExpanded: Binding(
+                get: { expandedStreams.contains(stream.id) },
+                set: { if $0 { expandedStreams.insert(stream.id) } else { expandedStreams.remove(stream.id) } }
+            )) {
+                ForEach(stream.agents) { agent in
+                    Button {
+                        selection = stream.id
+                        agentSelection = agent.id
+                    } label: {
+                        HStack {
+                            Image(systemName: "point.3.connected.trianglepath.dotted").foregroundStyle(stateColor(agent.state))
+                            Text(agent.title).lineLimit(2)
+                            Spacer(minLength: 0)
+                        }.contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(agent.title + " · " + agent.state)
+                    .listRowBackground(selection == stream.id && agentSelection == agent.id ? Color.accentColor.opacity(0.16) : Color.clear)
+                }
+            } label: { sidebarRow(stream) }
+        }
     }
 
     private var sidebar: some View {
@@ -179,7 +210,7 @@ struct Dashboard: View {
                     set: { if $0 { expanded.insert(box) } else { expanded.remove(box) } }
                 )) {
                     ForEach(streams) { stream in
-                        sidebarRow(stream)
+                        streamBranch(stream)
                     }
                 } label: {
                     Label(box.rawValue, systemImage: box.icon).badge(streams.count)
@@ -198,7 +229,9 @@ struct Dashboard: View {
                 if let stream = selected {
                     HSplitView {
                         Group {
-                            if stream.live && stream.state != "Done" {
+                            if let agent = stream.agents.first(where: { $0.id == agentSelection }) {
+                                SubagentDetail(streamID: stream.id, agent: agent) { agentSelection = nil }.id(agent.id)
+                            } else if stream.live && stream.state != "Done" {
                                 if let appearance {
                                     StreamTerminal(streamID: stream.id, appearance: appearance).id(stream.id)
                                 } else { ProgressView() }
@@ -260,6 +293,7 @@ struct Dashboard: View {
             NewStream(store: store, folder: suggestedFolder) { id, folder in
                 lastFolder = folder
                 selection = id
+                agentSelection = nil
                 expanded.insert(.active)
                 adding = false
             }
