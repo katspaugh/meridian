@@ -4,7 +4,7 @@
 
 Each workstream has a persistent terminal, a task list Claude maintains in Beads, and links to the pull requests and Linear issues it touches. When one session asks for permission or finishes a turn, it appears under **Needs you** or **Ready for review** in the sidebar.
 
-![Muxteroid showing two workstreams, an embedded Claude Code terminal, tasks grouped by status, and links to pull requests and Linear issues.](docs/images/workstreams.png)
+![Three workstreams in Muxteroid. Claude Code edits an Android layout in the selected terminal, with blocked and completed tasks on the right and Linear issue links below.](docs/images/workstreams.png)
 
 ## Try it on your Mac
 
