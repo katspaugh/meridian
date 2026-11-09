@@ -270,64 +270,65 @@ struct Dashboard: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            VStack(spacing: 0) {
-                if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
-                if let stream = selected {
-                    HSplitView {
-                        Group {
-                            if stream.provider == "codex", agentSelection != nil, !stream.live {
-                                Text("Start the workstream terminal to open this subagent.")
-                            } else if let archivedAgent, archivedAgent == agentSelection, let appearance {
-                                StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent, codexChild: stream.provider == "codex").id(archivedAgent)
-                            } else if stream.live && stream.state != "Done" {
-                                if let appearance {
-                                    StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus).id(stream.id)
-                                } else { ProgressView() }
-                            } else if stream.state == "Done" {
-                                Label("Completed", systemImage: "checkmark.circle")
-                            } else {
-                                Button("Start terminal") { Task { _ = await store.perform(["open", stream.id]) } }
-                                    .buttonStyle(.borderedProminent).disabled(store.busy)
-                            }
-                        }.frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
-                        if inspectorVisible {
-                            inspector(stream).frame(minWidth: 218, idealWidth: 285, maxWidth: 410)
-                        }
-                    }
-                    if !stream.links.isEmpty {
-                        Divider()
-                        ScrollView(.horizontal) {
-                            HStack(spacing: 14) {
-                                ForEach(stream.links) { item in
-                                    Link(destination: item.url) {
-                                        Label(item.label, systemImage: item.kind == "pr" ? "arrow.triangle.pull" : "circle.hexagongrid")
-                                    }
-                                    .accessibilityLabel((item.kind == "pr" ? "Pull request " : "Linear issue ") + item.label)
-                                    .help(item.url.absoluteString)
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                VStack(spacing: 0) {
+                    if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
+                    if let stream = selected {
+                        HSplitView {
+                            Group {
+                                if stream.provider == "codex", agentSelection != nil, !stream.live {
+                                    Text("Start the workstream terminal to open this subagent.")
+                                } else if let archivedAgent, archivedAgent == agentSelection, let appearance {
+                                    StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent, codexChild: stream.provider == "codex").id(archivedAgent)
+                                } else if stream.live && stream.state != "Done" {
+                                    if let appearance {
+                                        StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus).id(stream.id)
+                                    } else { ProgressView() }
+                                } else if stream.state == "Done" {
+                                    Label("Completed", systemImage: "checkmark.circle")
+                                } else {
+                                    Button("Start terminal") { Task { _ = await store.perform(["open", stream.id]) } }
+                                        .buttonStyle(.borderedProminent).disabled(store.busy)
                                 }
-                            }.font(.callout).padding(.horizontal, 12).padding(.vertical, 7)
-                        }.frame(maxWidth: .infinity, alignment: .leading).background(.bar)
+                            }.frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
+                            if inspectorVisible {
+                                inspector(stream).frame(minWidth: 218, idealWidth: 285, maxWidth: 410)
+                            }
+                        }
+                        if !stream.links.isEmpty {
+                            Divider()
+                            ScrollView(.horizontal) {
+                                HStack(spacing: 14) {
+                                    ForEach(stream.links) { item in
+                                        Link(destination: item.url) {
+                                            Label(item.label, systemImage: item.kind == "pr" ? "arrow.triangle.pull" : "circle.hexagongrid")
+                                        }
+                                        .accessibilityLabel((item.kind == "pr" ? "Pull request " : "Linear issue ") + item.label)
+                                        .help(item.url.absoluteString)
+                                    }
+                                }.font(.callout).padding(.horizontal, 12).padding(.vertical, 7)
+                            }.frame(maxWidth: .infinity, alignment: .leading).background(.bar)
+                        }
+                    } else {
+                        Button("New workstream…") { adding = true }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                } else {
-                    Button("New workstream…") { adding = true }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .navigationTitle(selected?.title ?? "Workstreams")
+                .toolbar {
+                    Button { adding = true } label: { Label("New workstream", systemImage: "plus") }.keyboardShortcut("n")
+                    Button { inspectorVisible.toggle() } label: {
+                        Label(inspectorVisible ? "Hide inspector" : "Show inspector", systemImage: "sidebar.right")
+                    }
+                    .help(inspectorVisible ? "Hide inspector" : "Show inspector")
+                    .keyboardShortcut("i", modifiers: [.command, .option])
                 }
             }
-            .navigationTitle(selected?.title ?? "Workstreams")
-            .toolbar {
-                Button { adding = true } label: { Label("New workstream", systemImage: "plus") }.keyboardShortcut("n")
-                Button { inspectorVisible.toggle() } label: {
-                    Label(inspectorVisible ? "Hide inspector" : "Show inspector", systemImage: "sidebar.right")
-                }
-                .help(inspectorVisible ? "Hide inspector" : "Show inspector")
-                .keyboardShortcut("i", modifiers: [.command, .option])
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) { Divider(); UsageBar() }
+            Divider()
+            UsageBar()
         }
         .frame(minWidth: 720, minHeight: 440)
         .task {

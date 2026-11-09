@@ -19,6 +19,7 @@ private struct ProviderUsage: Decodable {
     let windows: [UsageWindow]
     let measured: TimeInterval?
     let hint: String?
+    let status: String?
 }
 
 struct UsageBar: View {
@@ -29,10 +30,7 @@ struct UsageBar: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
             HStack(spacing: 14) {
-                Link(destination: URL(string: "https://claude.ai/settings/usage")!) {
-                    group("Claude", id: "claude", icon: "sun.max.fill", tint: .orange, now: timeline.date)
-                }
-                .accessibilityHint("Opens Claude account usage in your browser")
+                group("Claude", id: "claude", icon: "sun.max.fill", tint: .orange, now: timeline.date)
                 Divider().frame(height: 12)
                 group("Codex", id: "codex", icon: "terminal", tint: .primary, now: timeline.date)
                 Button {
@@ -89,15 +87,11 @@ struct UsageBar: View {
                     if let left = windows[index].countdown(at: now) { Text(left) }
                 }
             } else {
-                if id == "claude" && (reading != nil || failed) {
-                    Label("View usage", systemImage: "arrow.up.right").foregroundStyle(.link)
-                } else {
-                    Text("—")
-                }
+                Text(failed ? "Unavailable" : reading?.status ?? (loading ? "Loading…" : "—"))
             }
         }
         .monospacedDigit().fixedSize()
-        .help((summary.isEmpty ? hint : summary) + (id == "claude" ? "\nOpen Claude account usage in your browser." : ""))
+        .help(summary.isEmpty ? hint : summary)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(name + " usage. " + (summary.isEmpty ? hint : summary))
     }

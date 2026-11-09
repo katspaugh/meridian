@@ -61,7 +61,16 @@ def claude_live():
         windows = claude_windows(data.get("rate_limits") or {})
         if windows:
             return dict(windows=windows, measured=time.time())
+        if data.get("rate_limits_available") is False:
+            return dict(windows=[], status="Unavailable",
+                        hint="Claude Code did not report subscription limits. Check your Claude Code sign-in and plan.")
     return None
+
+
+def claude_signed_out():
+    proc = subprocess.run(["claude", "auth", "status"], cwd="/", stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True, timeout=5)
+    return json.loads(proc.stdout).get("loggedIn") is False
 
 
 def claude_cached(root):
@@ -89,18 +98,25 @@ def claude_cached(root):
 
 
 def claude(root):
-    # A separate CLI process may have a different account context from the
-    # interactive workstream. Prefer recent readings from Claude itself.
+    # Query on every refresh so a recent cache cannot hide new consumption.
+    live = None
+    try:
+        live = claude_live()
+        if live and live["windows"]:
+            return live
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
     cached = claude_cached(root)
     if cached:
         return cached
     try:
-        live = claude_live()
-        if live:
-            return live
+        if claude_signed_out():
+            return dict(windows=[], status="Sign in",
+                        hint="Sign in with `claude auth login` in your terminal, then refresh usage.")
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
-    return dict(windows=[], hint="No recent usage figures from Claude Code.")
+    return live or dict(windows=[], status="Unavailable",
+                        hint="Couldn’t load Claude usage. Check the CLI sign-in and connection, then refresh.")
 
 
 def codex():
