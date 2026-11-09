@@ -8,14 +8,16 @@ final class DtachConnection: @unchecked Sendable {
     private let queue = DispatchQueue(label: "local.muxteroid.dtach")
     private let socket: NWConnection
     private let streamID: String
+    private let onDisconnect: () -> Void
     private weak var session: InMemoryTerminalSession?
     private var viewport: InMemoryTerminalViewport?
     private var attached = false
     private var finished = false
 
-    init(path: String, streamID: String) {
+    init(path: String, streamID: String, onDisconnect: @escaping () -> Void) {
         socket = NWConnection(to: .unix(path: path), using: .tcp)
         self.streamID = streamID
+        self.onDisconnect = onDisconnect
     }
 
     deinit { socket.cancel() }
@@ -115,6 +117,8 @@ final class DtachConnection: @unchecked Sendable {
         finished = true
         socket.cancel()
         WorkstreamLog.record("stream=\(streamID) dtach socket closed status=\(code)")
-        session?.finish(exitCode: code, runtimeMilliseconds: 0)
+        // dtach EOF is a transport event, not a newly spawned command failing.
+        // Reporting a zero-runtime process exit makes Ghostty show its launch-error screen.
+        DispatchQueue.main.async(execute: onDisconnect)
     }
 }

@@ -6,6 +6,7 @@ struct WorkstreamTerminalBar: View {
     let switching, canAdd: Bool
     let select: (WorkstreamTerminal) -> Void
     let add: (String) -> Void
+    let close: (WorkstreamTerminal) -> Void
 
     var body: some View {
         HStack(spacing: 4) {
@@ -51,5 +52,8 @@ struct WorkstreamTerminalBar: View {
         .accessibilityLabel(terminal.title + " · " + terminal.state)
         .accessibilityAddTraits(selectedID == terminal.id ? .isSelected : [])
         .help(terminal.title + " · " + terminal.state)
+        .contextMenu {
+            Button("Close Terminal") { close(terminal) }
+        }
     }
 }

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import sqlite3
@@ -55,6 +56,7 @@ def database():
     db = sqlite3.connect(ROOT/"activity.sqlite", timeout=10)
     db.execute("CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, session TEXT, state TEXT, detail TEXT, transcript TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS workstream_terminals (id TEXT PRIMARY KEY, stream TEXT NOT NULL, provider TEXT NOT NULL, title TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS closed_terminals (id TEXT PRIMARY KEY)")
     db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
     subagents.initialize(db)
@@ -133,7 +135,7 @@ def terminal_owner(key):
     return row[0] if row else key
 
 
-def terminal_issue(key):
+def terminal_issue(key, allow_closed=False):
     parent = terminal_owner(key)
     issue = json.loads(bd("show", parent, "--json"))[0]
     if issue.get("parent") or not (issue.get("metadata") or {}).get("folder"):
@@ -141,6 +143,8 @@ def terminal_issue(key):
     with database() as db:
         register_original(db, issue)
         row = db.execute("SELECT provider FROM workstream_terminals WHERE id=? AND stream=?", (key, parent)).fetchone()
+        if not allow_closed and db.execute("SELECT 1 FROM closed_terminals WHERE id=?", (key,)).fetchone():
+            raise ValueError("This terminal is closed.")
     if not row:
         raise ValueError("Unknown terminal.")
     return issue, row[0]
@@ -149,7 +153,7 @@ def terminal_issue(key):
 def add_terminal(parent, provider):
     if provider not in PROVIDERS:
         raise ValueError("Choose a plain terminal, Claude, or Codex.")
-    issue, _ = terminal_issue(parent)
+    issue, _ = terminal_issue(parent, allow_closed=True)
     if issue["id"] != parent or issue["status"] == "closed":
         raise ValueError("Reopen this workstream before adding a terminal.")
     key = "term-" + uuid.uuid4().hex[:16]
@@ -167,6 +171,79 @@ def add_terminal(parent, provider):
                 db.execute("DELETE FROM activity WHERE id=?", (key,))
         raise
     return key
+
+
+def mark_terminal_closed(key):
+    with database() as db:
+        db.execute("INSERT OR IGNORE INTO closed_terminals VALUES (?)", (key,))
+
+
+def use_shell(key):
+    with database() as db:
+        if db.execute("SELECT 1 FROM closed_terminals WHERE id=?", (key,)).fetchone():
+            return False
+        db.execute("UPDATE workstream_terminals SET provider='shell',title='Terminal' WHERE id=?", (key,))
+        # Invalidates late agent hooks without deleting saved transcripts or links.
+        db.execute("UPDATE activity SET session=NULL,state='Ready',detail='Shell is ready.' WHERE id=?", (key,))
+    return True
+
+
+def run_terminal(key, command):
+    """The PTY outlives its agent; the shell's exit ends the terminal itself."""
+    _, provider = terminal_issue(key)
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGHUP, stop)
+    signal.signal(signal.SIGTERM, stop)
+    # Let the foreground program interpret Ctrl+C without interrupting this supervisor.
+    signal.signal(signal.SIGINT, lambda signum, frame: None)
+    tty = termios.tcgetattr(0) if os.isatty(0) else None
+    try:
+        subprocess.run(command, check=False)
+        if provider != 'shell' and use_shell(key):
+            if tty is not None:
+                termios.tcsetattr(0, termios.TCSANOW, tty)
+                print('\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[0m', end='', flush=True)
+            subprocess.run([os.environ.get('SHELL') or '/bin/zsh', '-l'], check=False)
+    finally:
+        mark_terminal_closed(key)
+
+
+def close_terminal(key):
+    terminal_issue(key, allow_closed=True)
+    if key in terminals():
+        path = str(TERMINALS / key)
+        # The socket identifies the owning dtach daemon, never an agent by its name.
+        result = subprocess.run(['/usr/sbin/lsof', '-t', '-a', '-U', '-c', 'dtach', path],
+                                capture_output=True, text=True)
+        pids = [int(p) for p in result.stdout.split() if p.isdigit()]
+        if not pids:
+            raise ValueError('Cannot find the terminal process. Try closing it again.')
+        mark_terminal_closed(key)
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    elif key in legacy_sessions():
+        run(LEGACY_TMUX + ['kill-session', '-t', '=' + key])
+        mark_terminal_closed(key)
+    else:
+        mark_terminal_closed(key)
+
+
+def terminal_exited(key):
+    """Handle sessions launched before the agent-to-shell supervisor was installed."""
+    with database() as db:
+        if db.execute("SELECT 1 FROM closed_terminals WHERE id=?", (key,)).fetchone():
+            return
+    if key in terminals() or key in legacy_sessions():
+        return
+    issue, provider = terminal_issue(key)
+    if provider == 'shell' or issue['status'] == 'closed':
+        mark_terminal_closed(key)
+    elif use_shell(key):
+        launch(key)
 
 
 def agent_context(key, event):
@@ -297,6 +374,7 @@ def streams():
         for issue in parents.values():
             register_original(db, issue)
         registry = list(db.execute("SELECT id,stream,provider,title FROM workstream_terminals ORDER BY rowid"))
+        closed = {row[0] for row in db.execute("SELECT id FROM closed_terminals")}
         owners = {key: parent for key, parent, _, _ in registry}
         providers = {key: provider for key, _, provider, _ in registry}
         folders = {key: parents[parent]['metadata']['folder'] for key, parent, _, _ in registry if parent in parents}
@@ -332,7 +410,7 @@ def streams():
         key = issue["id"]
         entries = []
         for tid, parent, provider, title in registry:
-            if parent != key:
+            if parent != key or tid in closed:
                 continue
             state, detail = runtime.get(tid, ("Queued", "Open the terminal to start."))
             if tid in runtime and tid not in live and (state != "Review" or provider == "shell"):
@@ -344,7 +422,7 @@ def streams():
                                 agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])]))
         # An idle shell does not mask finished agent work. A working agent does.
         priority = {"Needs you": 0, "Working": 1, "Review": 2, "Ready": 3, "Queued": 4, "Offline": 5}
-        representative = min(entries, key=lambda t: priority.get(t['state'], 6))
+        representative = min(entries, key=lambda t: priority.get(t['state'], 6)) if entries else dict(state='Ready', detail='Add a terminal to continue this workstream.')
         state, detail = representative['state'], representative['detail']
         if issue["status"] == "closed":
             state = "Done"
@@ -374,7 +452,7 @@ def launch(key):
             shell = os.environ.get("SHELL") or "/bin/zsh"
             with database() as db:
                 db.execute("INSERT OR REPLACE INTO activity VALUES (?,NULL,'Ready','Shell is ready.',NULL)", (key,))
-            run(["dtach", "-n", str(TERMINALS/key), "-r", "winch", shell, "-l"],
+            run(["dtach", "-n", str(TERMINALS/key), "-r", "winch", sys.executable, str(Path(__file__).resolve()), "terminal-run", key, shell, "-l"],
                 cwd=folder, env=env, stdin=subprocess.DEVNULL)
             return
         if provider == "codex":
@@ -382,7 +460,8 @@ def launch(key):
                 raise ValueError("Install Codex CLI and check the workstream folder.")
             with database() as db:
                 db.execute("INSERT OR IGNORE INTO activity VALUES (?,NULL,'Ready','Opening Codex.',NULL)", (key,))
-            run(["dtach","-n",str(TERMINALS/key),"-r","winch",sys.executable,str(Path(__file__).resolve()),"codex-run",key],
+            run(["dtach","-n",str(TERMINALS/key),"-r","winch",sys.executable,str(Path(__file__).resolve()),"terminal-run",key,
+                 sys.executable,str(Path(__file__).resolve()),"codex-run",key],
                 cwd=folder,env=env,stdin=subprocess.DEVNULL)
             return
         claude = shutil.which("claude")
@@ -409,7 +488,7 @@ def launch(key):
         args.extend(["--plugin-dir", str(plugin)])
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
-        run(["dtach", "-n", str(TERMINALS / key), "-r", "winch", *args],
+        run(["dtach", "-n", str(TERMINALS / key), "-r", "winch", sys.executable, str(Path(__file__).resolve()), "terminal-run", key, *args],
             cwd=folder, env=env, stdin=subprocess.DEVNULL)
 
 
@@ -441,6 +520,8 @@ def main(action, *args):
         return
     if action == "hook":
         return hook(*args)
+    if action == "terminal-run":
+        return run_terminal(args[0], list(args[1:]))
     if action == "codex-run":
         key, = args
         with database() as db:
@@ -508,6 +589,10 @@ def main(action, *args):
             launch(*args)
         elif action == "add-terminal":
             print(add_terminal(*args))
+        elif action == "close-terminal":
+            close_terminal(*args)
+        elif action == "terminal-exited":
+            terminal_exited(*args)
         elif action in ("close", "reopen"):
             bd(action, *args)
         else:

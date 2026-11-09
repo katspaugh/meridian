@@ -3,7 +3,7 @@ import MarkdownUI
 
 struct WorkstreamInspector: View {
     let stream: Stream
-    let terminal: WorkstreamTerminal
+    let terminal: WorkstreamTerminal?
     let busy: Bool
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
@@ -44,7 +44,7 @@ struct WorkstreamInspector: View {
                     ForEach(groups, id: \.self) { status in
                         taskGroup(status)
                     }
-                    if !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
+                    if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
                         Divider()
                         DisclosureGroup(isExpanded: $detailExpanded) {
                             Markdown(terminal.detail)

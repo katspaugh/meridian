@@ -157,14 +157,24 @@ struct StreamTerminal: View {
     var socket: String? = nil
     var isCodex = false
     var visible = true
+    var onDisconnect: (() -> Void)? = nil
+    var onRequestClose: (() -> Void)? = nil
+    var sessionIdentity: String = ""
 
     var body: some View {
+        Group {
         if disconnected {
             Button("Reconnect terminal") { disconnected = false }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ConnectedTerminal(options: self) { disconnected = true }
+            ConnectedTerminal(options: self) {
+                disconnected = true
+                onDisconnect?()
+            }
         }
+        }
+        // A pre-upgrade agent can exit and be replaced by a shell at the same socket path.
+        .onChange(of: sessionIdentity) { disconnected = false }
     }
 }
 
@@ -177,15 +187,15 @@ private struct ConnectedTerminal: View {
     init(options: StreamTerminal, disconnected: @escaping () -> Void) {
         self.options = options
         self.disconnected = disconnected
-        _terminal = StateObject(wrappedValue: Self.makeTerminal(options))
+        _terminal = StateObject(wrappedValue: Self.makeTerminal(options, disconnected: disconnected))
     }
 
-    private static func makeTerminal(_ options: StreamTerminal) -> TerminalViewState {
+    private static func makeTerminal(_ options: StreamTerminal, disconnected: @escaping () -> Void) -> TerminalViewState {
         let streamID = options.streamID
         WorkstreamLog.record("stream=\(streamID) terminal controller setup begin")
         let state = TerminalViewState(controller: TerminalController(configSource: .generated(options.appearance), theme: TerminalTheme()))
         if let socket = options.socket {
-            let session = DtachConnection(path: socket, streamID: streamID)
+            let session = DtachConnection(path: socket, streamID: streamID, onDisconnect: disconnected)
                 .start(restoreCodexMouseReporting: options.isCodex)
             state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), waitAfterCommand: false)
             return state
@@ -204,7 +214,10 @@ private struct ConnectedTerminal: View {
         TerminalSurfaceView(context: terminal)
             .onAppear {
                 WorkstreamLog.record("stream=\(options.streamID) terminal surface appeared")
-                terminal.onClose = { _ in disconnected() }
+                terminal.onClose = { processAlive in
+                    if processAlive, let close = options.onRequestClose { close() }
+                    else { disconnected() }
+                }
                 terminal.isSurfaceVisible = options.visible
                 if options.visible { terminal.requestFocus() }
             }
@@ -235,9 +248,9 @@ struct Dashboard: View {
     @AppStorage("lastWorkstreamFolder") private var lastFolder = ""
 
     private var selected: Stream? { store.rows.first { $0.id == selection } }
-    private func selectedTerminal(_ stream: Stream) -> WorkstreamTerminal {
+    private func selectedTerminal(_ stream: Stream) -> WorkstreamTerminal? {
         let choices = (try? JSONDecoder().decode([String: String].self, from: Data(terminalSelections.utf8))) ?? [:]
-        return stream.terminals.first { $0.id == choices[stream.id] } ?? stream.terminals[0]
+        return stream.terminals.first { $0.id == choices[stream.id] } ?? stream.terminals.first
     }
 
     private func rememberTerminal(_ terminalID: String, in stream: Stream) {
@@ -300,14 +313,14 @@ struct Dashboard: View {
     private func selectTerminal(_ stream: Stream, agent: Subagent?) {
         guard !switching else { return }
         if let agent { rememberTerminal(agent.terminalID, in: stream) }
-        let terminal = selectedTerminal(stream)
-        WorkstreamLog.record("stream=\(stream.id) terminal=\(terminal.id) select provider=\(terminal.provider) live=\(terminal.live) child=\(agent != nil)")
         showingBoard = false
         terminalFocus = UUID()
         let previousStream = selection
         selection = stream.id
         archivedAgent = nil
         if previousStream != stream.id { agentSelection = nil }
+        guard let terminal = selectedTerminal(stream) else { return }
+        WorkstreamLog.record("stream=\(stream.id) terminal=\(terminal.id) select provider=\(terminal.provider) live=\(terminal.live) child=\(agent != nil)")
         if terminal.provider == "codex" {
             agentSelection = agent?.id
             archivedAgent = agent?.id
@@ -339,13 +352,35 @@ struct Dashboard: View {
     }
 
     private func terminalBar(_ stream: Stream) -> some View {
-        WorkstreamTerminalBar(terminals: stream.terminals, selectedID: selectedTerminal(stream).id,
+        WorkstreamTerminalBar(terminals: stream.terminals, selectedID: selectedTerminal(stream)?.id ?? "",
                               switching: switching, canAdd: !store.busy && !switching && stream.state != "Done",
                               select: { terminal in
             rememberTerminal(terminal.id, in: stream)
             agentSelection = nil
             selectTerminal(stream, agent: nil)
-        }, add: { provider in addTerminal(provider, to: stream) })
+        }, add: { provider in addTerminal(provider, to: stream) },
+                              close: { terminal in closeTerminal(terminal, in: stream) })
+    }
+
+    private func closeTerminal(_ terminal: WorkstreamTerminal, in stream: Stream) {
+        guard !store.busy, !switching else { return }
+        Task {
+            if await store.perform(["close-terminal", terminal.id]) != nil {
+                agentSelection = nil
+                archivedAgent = nil
+                terminalFocus = UUID()
+            }
+        }
+    }
+
+    private func terminalDisconnected(_ terminal: WorkstreamTerminal) {
+        Task {
+            // Unlike user commands, transport cleanup must not be dropped while another action is busy.
+            do {
+                _ = try await Bridge.run(["terminal-exited", terminal.id])
+                await store.refresh()
+            } catch { store.error = error.localizedDescription }
+        }
     }
 
     private func addTerminal(_ provider: String, to stream: Stream) {
@@ -408,16 +443,20 @@ struct Dashboard: View {
                                 ZStack {
                                 if let appearance, stream.state != "Done" {
                                     ForEach(stream.terminals.filter(\.live)) { entry in
-                                        let visible = entry.id == terminal.id && archivedAgent == nil
+                                        let visible = entry.id == terminal?.id && archivedAgent == nil
                                         StreamTerminal(streamID: entry.id, appearance: appearance,
                                                        focusRequest: terminalFocus, socket: entry.terminalSocket,
-                                                       isCodex: entry.provider == "codex", visible: visible)
+                                                       isCodex: entry.provider == "codex", visible: visible,
+                                                       onDisconnect: { terminalDisconnected(entry) },
+                                                       onRequestClose: { closeTerminal(entry, in: stream) },
+                                                       sessionIdentity: entry.session ?? entry.provider)
                                             .id(entry.id)
                                             .opacity(visible ? 1 : 0)
                                             .allowsHitTesting(visible)
                                             .accessibilityHidden(!visible)
                                     }
                                 }
+                                if let terminal {
                                 if terminal.provider == "codex", agentSelection != nil, !terminal.live {
                                     Text("Start the workstream terminal to open this subagent.")
                                 } else if let archivedAgent, archivedAgent == agentSelection, let appearance {
@@ -429,6 +468,9 @@ struct Dashboard: View {
                                 } else {
                                     Button("Start terminal") { Task { _ = await store.perform(["open", terminal.id]) } }
                                         .buttonStyle(.borderedProminent).disabled(store.busy)
+                                }
+                                } else {
+                                    Text("No terminals open. Use + to add one.").foregroundStyle(.secondary)
                                 }
                                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                             }.frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
@@ -470,6 +512,7 @@ struct Dashboard: View {
             UsageBar()
         }
         .frame(minWidth: 720, minHeight: 440)
+        .focusedSceneValue(\.closeWorkstreamTerminal, closeTerminalAction)
         .task {
             WorkstreamLog.record("terminal appearance load begin")
             appearance = await GhosttyAppearance.load()
@@ -499,6 +542,12 @@ struct Dashboard: View {
         } message: { Text(store.error) }
     }
 
+    private var closeTerminalAction: (() -> Void)? {
+        guard !showingBoard, !store.busy, !switching,
+              let stream = selected, let terminal = selectedTerminal(stream) else { return nil }
+        return { closeTerminal(terminal, in: stream) }
+    }
+
     private func selectNotification() {
         guard let id = notifications.destination,
               let stream = store.rows.first(where: { $0.id == id }) else { return }
@@ -520,6 +569,29 @@ struct Dashboard: View {
                     expanded.insert(stream.state == "Done" ? .active : .done)
                 }
             }
+        }
+    }
+}
+
+private struct CloseWorkstreamTerminalKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var closeWorkstreamTerminal: (() -> Void)? {
+        get { self[CloseWorkstreamTerminalKey.self] }
+        set { self[CloseWorkstreamTerminalKey.self] = newValue }
+    }
+}
+
+struct TerminalCommands: Commands {
+    @FocusedValue(\.closeWorkstreamTerminal) private var closeTerminal
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("Close Terminal") { closeTerminal?() }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(closeTerminal == nil)
         }
     }
 }
@@ -575,6 +647,7 @@ struct NewStream: View {
         Window("Muxteroid", id: "dashboard") {
             Dashboard(store: notifications.store, notifications: notifications)
         }.defaultSize(width: 1080, height: 760)
+        .commands { TerminalCommands() }
         .onChange(of: notifications.destination) { _, id in
             if id != nil { openWindow(id: "dashboard") }
         }

@@ -190,6 +190,66 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.parent['status'] = 'closed'
         self.assertEqual(streams.streams()[0]['state'], 'Done')
 
+    def test_agent_exit_runs_shell_before_closing_tab(self):
+        key = self.register(provider='claude')
+        commands = []
+        def execute(command, **kwargs):
+            commands.append(command)
+            if len(commands) == 2:
+                with streams.database() as db:
+                    self.assertEqual(db.execute('SELECT provider FROM workstream_terminals WHERE id=?', (key,)).fetchone()[0], 'shell')
+                    self.assertIsNone(db.execute('SELECT 1 FROM closed_terminals WHERE id=?', (key,)).fetchone())
+        with patch.object(streams.signal, 'signal'), patch.object(streams.os, 'isatty', return_value=False), \
+             patch.object(streams.subprocess, 'run', side_effect=execute):
+            streams.run_terminal(key, ['claude'])
+        self.assertEqual(commands[0], ['claude'])
+        self.assertEqual(commands[1][-1], '-l')
+        self.assertNotIn(key, [t['id'] for t in streams.streams()[0]['terminals']])
+
+    def test_shell_exit_closes_tab_without_starting_another_shell(self):
+        key = self.register(provider='shell')
+        with patch.object(streams.signal, 'signal'), patch.object(streams.os, 'isatty', return_value=False), \
+             patch.object(streams.subprocess, 'run') as execute:
+            streams.run_terminal(key, ['/bin/sh', '-l'])
+        execute.assert_called_once_with(['/bin/sh', '-l'], check=False)
+        self.assertNotIn(key, [t['id'] for t in streams.streams()[0]['terminals']])
+
+    def test_last_tab_stays_closed_and_workstream_can_add_again(self):
+        streams.streams()
+        streams.close_terminal(self.parent['id'])
+        row = streams.streams()[0]
+        self.assertEqual(row['terminals'], [])
+        self.assertEqual(row['state'], 'Ready')
+        self.assertEqual(row['tasks'][0]['id'], self.child['id'])
+        with patch.object(streams, 'launch'):
+            key = streams.add_terminal(self.parent['id'], 'shell')
+        self.assertEqual([t['id'] for t in streams.streams()[0]['terminals']], [key])
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            streams.launch(self.parent['id'])
+
+    def test_close_signals_only_the_selected_socket_owner(self):
+        key = self.register()
+        self.live.add(key)
+        result = subprocess.CompletedProcess([], 0, '12345\n', '')
+        with patch.object(streams.subprocess, 'run', return_value=result) as lookup, patch.object(streams.os, 'kill') as kill:
+            streams.close_terminal(key)
+        self.assertEqual(lookup.call_args.args[0][-1], str(streams.TERMINALS / key))
+        kill.assert_called_once_with(12345, streams.signal.SIGTERM)
+        self.assertFalse(streams.use_shell(key))
+
+    def test_legacy_exit_falls_back_only_after_agent_has_stopped(self):
+        key = self.register()
+        self.live.add(key)
+        with patch.object(streams, 'launch') as launch:
+            streams.terminal_exited(key)
+            launch.assert_not_called()
+            self.live.remove(key)
+            streams.terminal_exited(key)
+            launch.assert_called_once_with(key)
+        self.assertEqual(streams.terminal_issue(key)[1], 'shell')
+        streams.terminal_exited(key)
+        self.assertNotIn(key, [t['id'] for t in streams.streams()[0]['terminals']])
+
 
 class WorktreeCreationTests(unittest.TestCase):
     def setUp(self):
