@@ -87,8 +87,9 @@ struct SprintBoard: View {
                         }
                     }
                 }
+                .defaultScrollAnchor(.topLeading)
             }
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private func lane(_ stream: Stream) -> some View {
