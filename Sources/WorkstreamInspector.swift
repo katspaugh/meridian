@@ -4,7 +4,10 @@ import MarkdownUI
 struct WorkstreamInspector: View {
     let stream: Stream
     let busy: Bool
-    let toggleCompletion: () -> Void
+    let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
+
+    @State private var confirmingCompletion = false
+    private var unfinishedTasks: [BeadsTask] { stream.tasks.filter { $0.status != "closed" } }
 
     @AppStorage("workstreamDetailExpanded") private var detailExpanded = true
 
@@ -69,8 +72,23 @@ struct WorkstreamInspector: View {
                     .font(.callout).foregroundStyle(.secondary).help(stream.folder)
                     .accessibilityLabel(stream.folder)
                 if !stream.reference.isEmpty { Text(stream.reference).font(.callout).textSelection(.enabled) }
-                Button(stream.state == "Done" ? "Reopen" : "Mark complete", action: toggleCompletion)
-                    .disabled(busy)
+                Button(stream.state == "Done" ? "Reopen" : "Mark complete") {
+                    if stream.state != "Done" && !unfinishedTasks.isEmpty {
+                        confirmingCompletion = true
+                    } else {
+                        toggleCompletion(false)
+                    }
+                }
+                .disabled(busy)
+                .alert("Mark this workstream complete?", isPresented: $confirmingCompletion) {
+                    Button("Cancel", role: .cancel) { }
+                    Button("Mark complete") { toggleCompletion(true) }
+                } message: {
+                    let count = unfinishedTasks.count
+                    let titles = unfinishedTasks.prefix(3).map(\.title).joined(separator: "\n")
+                    let remaining = count > 3 ? "\n…and \(count - 3) more" : ""
+                    Text("\(count) \(count == 1 ? "task will" : "tasks will") stay open in this workstream.\n\n\(titles)\(remaining)")
+                }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.bar)
         }

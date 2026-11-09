@@ -366,7 +366,7 @@ struct Dashboard: View {
                                 }
                             }.frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
                             if inspectorVisible {
-                                inspector(stream).frame(minWidth: 218, idealWidth: 285, maxWidth: 410)
+                                inspector(stream).id(stream.id).frame(minWidth: 218, idealWidth: 285, maxWidth: 410)
                             }
                         }
                         if !stream.links.isEmpty {
@@ -441,9 +441,11 @@ struct Dashboard: View {
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, busy: store.busy) {
+        WorkstreamInspector(stream: stream, busy: store.busy) { keepTasksOpen in
+            let reopening = stream.state == "Done"
+            let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
-                if await store.perform([stream.state == "Done" ? "reopen" : "close", stream.id]) != nil {
+                if await store.perform(args) != nil {
                     expanded.insert(stream.state == "Done" ? .active : .done)
                 }
             }
