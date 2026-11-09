@@ -141,7 +141,8 @@ struct StreamTerminal: View {
 }
 
 struct Dashboard: View {
-    @StateObject private var store = Store()
+    @ObservedObject var store: Store
+    @ObservedObject var notifications: AttentionNotifications
     @State private var expanded: Set<Inbox> = [.active]
     @State private var adding = false
     @State private var selection: String?
@@ -278,12 +279,11 @@ struct Dashboard: View {
         .frame(minWidth: 720, minHeight: 440)
         .task {
             appearance = await GhosttyAppearance.load()
-            while !Task.isCancelled {
-                await store.refresh()
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-            }
+
         }
+        .onChange(of: notifications.destination, initial: true) { _, _ in selectNotification() }
         .onChange(of: store.rows.map(\.id)) { _, ids in
+            selectNotification()
             if !ids.contains(selection ?? "") {
                 selection = store.rows.first(where: Inbox.active.includes)?.id ?? ids.first
                 if selected?.state == "Done" { expanded.insert(.done) }
@@ -301,6 +301,15 @@ struct Dashboard: View {
         .alert("Workstream error", isPresented: Binding(get: { !store.error.isEmpty && !adding }, set: { if !$0 { store.error = "" } })) {
             Button("OK") { store.error = "" }
         } message: { Text(store.error) }
+    }
+
+    private func selectNotification() {
+        guard let id = notifications.destination,
+              let stream = store.rows.first(where: { $0.id == id }) else { return }
+        selection = id
+        expanded.insert(stream.state == "Done" ? .done : .active)
+        agentSelection = nil
+        notifications.destination = nil
     }
 
     private func inspector(_ stream: Stream) -> some View {
@@ -352,7 +361,14 @@ struct NewStream: View {
 }
 
 @main struct MuxteroidApp: App {
+    @NSApplicationDelegateAdaptor(AttentionNotifications.self) private var notifications
+    @Environment(\.openWindow) private var openWindow
     var body: some Scene {
-        Window("Muxteroid", id: "dashboard") { Dashboard() }.defaultSize(width: 1080, height: 760)
+        Window("Muxteroid", id: "dashboard") {
+            Dashboard(store: notifications.store, notifications: notifications)
+        }.defaultSize(width: 1080, height: 760)
+        .onChange(of: notifications.destination) { _, id in
+            if id != nil { openWindow(id: "dashboard") }
+        }
     }
 }

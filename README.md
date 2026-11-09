@@ -23,7 +23,7 @@ Press **⌘N**, choose a working folder, and click **Create**. Give Claude a tas
 ## Working across streams
 
 - **Switch away while Claude works.** Each session runs in its own PTY. Switch streams or quit Muxteroid and the Claude process keeps running. After a reboot, Muxteroid can resume from Claude's saved conversation.
-- **See what's waiting on you.** Permission requests, questions, and errors appear under **Needs you**. Completed turns appear under **Ready for review**, with Claude's formatted reply in the inspector. You decide when to mark the workstream complete.
+- **See what's waiting on you.** Permission requests, questions, and errors appear under **Needs you**. Allow notifications at launch to get a macOS alert when a workstream or subagent needs input. Click it to return to the workstream. Alerts run while Muxteroid is open, including in the background. Completed turns appear under **Ready for review**, with Claude's formatted reply in the inspector. You decide when to mark the workstream complete.
 - **Inspect delegated work.** Expand a workstream in the sidebar to see its Claude subagents. Select one to read its assignment, tool activity, and responses, then select the parent to return to its terminal.
 - **Follow the plan.** Claude uses [Beads](https://github.com/gastownhall/beads) to track subtasks, dependencies, and blockers under the workstream. The inspector shows progress. Press **⌥⌘I** to give the terminal the full width.
 - **Jump to related work.** The bottom bar collects GitHub PRs and Linear issues from Claude's activity. The links stay with the stream when you reopen it.
