@@ -211,19 +211,24 @@ struct Dashboard: View {
     }
 
     private func sidebarRow(_ stream: Stream) -> some View {
-        Button {
+        let isCodex = stream.provider == "codex"
+        let agentName = isCodex ? "Codex" : "Claude"
+        let summary = "\(stream.title) · \(agentName) · \(stream.state)"
+        return Button {
             selectTerminal(stream, agent: nil)
         } label: {
             HStack {
-                Circle().fill(stateColor(stream.state)).frame(width: 7, height: 7)
+                AgentIcon(provider: stream.provider)
                 Text(stream.title).lineLimit(2)
                 Spacer(minLength: 0)
+                Circle().fill(stateColor(stream.state)).frame(width: 7, height: 7)
             }
             .padding(.vertical, 3).contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(switching)
         .listRowBackground(selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
-        .help(stream.title + " · " + stream.state)
+        .accessibilityLabel(summary)
+        .help(summary)
     }
 
     @ViewBuilder private func streamBranch(_ stream: Stream) -> some View {

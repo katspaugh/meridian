@@ -30,9 +30,9 @@ struct UsageBar: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { timeline in
             HStack(spacing: 14) {
-                group("Claude", id: "claude", icon: "sun.max.fill", tint: .orange, now: timeline.date)
+                group("Claude", id: "claude", now: timeline.date)
                 Divider().frame(height: 12)
-                group("Codex", id: "codex", icon: "terminal", tint: .primary, now: timeline.date)
+                group("Codex", id: "codex", now: timeline.date)
                 Button {
                     Task { await refresh() }
                 } label: {
@@ -58,7 +58,7 @@ struct UsageBar: View {
         }
     }
 
-    private func group(_ name: String, id: String, icon: String, tint: Color, now: Date) -> some View {
+    private func group(_ name: String, id: String, now: Date) -> some View {
         let reading = readings[id]
         let windows = (reading?.windows ?? []).filter { ($0.reset ?? .infinity) > now.timeIntervalSince1970 }
         var summary = windows.map { window in
@@ -72,7 +72,7 @@ struct UsageBar: View {
         }
         let hint = failed ? "Couldn’t refresh account usage." : reading?.hint ?? "Waiting for usage data."
         return HStack(spacing: 6) {
-            Image(systemName: icon).foregroundStyle(tint)
+            AgentIcon(provider: id)
             Text(name).fontWeight(.medium)
             if let primary = windows.first {
                 let fraction = min(1, max(0, primary.percent / 100))
