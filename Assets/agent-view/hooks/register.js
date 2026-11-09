@@ -8,6 +8,14 @@ export function register(on) {
     return next(event)
   })
 
+  on('session.measure', async ($, event, next) => {
+    if (event.changed.includes('rateLimits')) {
+      const directory = await $.env.get('MUXTEROID_VIEW_DIR')
+      if (directory) await $.fs.write(directory + '/usage.json', JSON.stringify(event.rateLimits))
+    }
+    return next(event)
+  })
+
   on('command.run', { command: 'muxteroid-view' }, async $ => {
     const directory = await $.env.get('MUXTEROID_VIEW_DIR')
     const session = await $.session.id()

@@ -12,7 +12,7 @@ let package = Package(
         .executableTarget(name: "Muxteroid", dependencies: [
             .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             .product(name: "GhosttyTerminal", package: "libghostty-spm")
-        ], path: "Sources", exclude: ["streams.py", "workstream_links.py", "subagents.py", "agent_navigation.py", "codex_session.py"])
+        ], path: "Sources", exclude: ["streams.py", "workstream_links.py", "subagents.py", "agent_navigation.py", "codex_session.py", "usage_limits.py"])
     ],
     swiftLanguageModes: [.v5]
 )

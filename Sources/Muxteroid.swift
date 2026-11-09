@@ -326,6 +326,9 @@ struct Dashboard: View {
                 .keyboardShortcut("i", modifiers: [.command, .option])
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) { Divider(); UsageBar() }
+        }
         .frame(minWidth: 720, minHeight: 440)
         .task {
             appearance = await GhosttyAppearance.load()

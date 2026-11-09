@@ -282,6 +282,10 @@ def attach_terminal(path):
 
 
 def main(action, *args):
+    if action == "usage":
+        import usage_limits
+        print(json.dumps(usage_limits.report(ROOT)))
+        return
     if action == "hook":
         return hook(*args)
     if action == "codex-run":
