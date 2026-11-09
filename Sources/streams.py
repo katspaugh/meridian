@@ -65,6 +65,61 @@ def database():
 PROVIDERS = {"claude": "Claude", "codex": "Codex", "shell": "Terminal"}
 
 
+def workstream_folder(folder):
+    """Allocate one checkout for the stream, independently of its agent provider."""
+    metadata = {"folder": str(folder), "sourceFolder": str(folder)}
+    probe = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, env=dict(os.environ, LC_ALL="C"))
+    if probe.returncode:
+        if "not a git repository" in probe.stderr:
+            return metadata
+        raise ValueError(probe.stderr.strip() or "Cannot inspect the selected Git repository.")
+    repository = Path(probe.stdout.strip()).resolve()
+    relative = folder.relative_to(repository)
+    try:
+        commit = run(["git", "-C", str(repository), "rev-parse", "--verify", "HEAD^{commit}"])
+    except ValueError as error:
+        raise ValueError("The repository needs an initial commit before creating a workstream.") from error
+    if relative != Path('.'):
+        try:
+            kind = run(["git", "-C", str(repository), "cat-file", "-t", f"{commit}:{relative.as_posix()}"])
+        except ValueError:
+            kind = None
+        if kind != "tree":
+            raise ValueError("The selected subfolder is not committed. Commit it first or choose the repository root.")
+    name = uuid.uuid4().hex[:12]
+    branch = "muxteroid/" + name
+    checkout = ROOT / "worktrees" / name
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "-C", str(repository), "worktree", "add", "-b", branch, str(checkout), commit])
+    metadata.update(folder=str(checkout / relative), worktreeRoot=str(checkout),
+                    worktreeBranch=branch, repository=str(repository))
+    return metadata
+
+
+def create_stream(title, folder, reference, provider="claude"):
+    if provider not in ("claude", "codex"):
+        raise ValueError("Unknown agent.")
+    folder = Path(folder).expanduser().resolve()
+    if not folder.is_dir():
+        raise ValueError("Choose an existing folder.")
+    metadata = workstream_folder(folder)
+    metadata["provider"] = provider
+    try:
+        return bd("create", "--title", title.strip() or "Untitled workstream", "-t", "task",
+                  "--metadata", json.dumps(metadata), "--silent",
+                  *(["--external-ref", reference.strip()] if reference.strip() else []))
+    except Exception as error:
+        if metadata.get("worktreeRoot"):
+            try:
+                # Never force removal: preserve files if something changed during creation.
+                run(["git", "-C", str(folder), "worktree", "remove", metadata["worktreeRoot"]])
+                run(["git", "-C", str(folder), "branch", "-d", metadata["worktreeBranch"]])
+            except ValueError as cleanup:
+                raise ValueError(f"{error}\nWorktree cleanup needs attention: {metadata['worktreeRoot']}\n{cleanup}") from error
+        raise
+
+
 def register_original(db, issue):
     """Keep the original socket/activity ID so running pre-upgrade sessions survive."""
     provider = issue["metadata"].get("provider", "claude")
@@ -294,6 +349,7 @@ def streams():
         if issue["status"] == "closed":
             state = "Done"
         rows.append(dict(id=key, terminalSocket=str(TERMINALS / key) if key in attached else None, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
+                         sourceFolder=issue["metadata"].get("sourceFolder"), worktreeBranch=issue["metadata"].get("worktreeBranch"),
                          reference=issue.get("external_ref") or "", state=state, detail=detail, live=any(t['live'] for t in entries), tasks=children.get(key, []), links=artifacts.get(key, []),
                          agents=[a for t in entries for a in t['agents']], terminals=entries,
                          session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
@@ -447,18 +503,7 @@ def main(action, *args):
         if action == "list":
             print(json.dumps(streams()))
         elif action == "create":
-            title, folder, reference = args[:3]
-            provider = args[3] if len(args) > 3 else "claude"
-            if provider not in ("claude","codex"):
-                raise ValueError("Unknown agent.")
-            folder = Path(folder).expanduser().resolve()
-            if not folder.is_dir():
-                raise ValueError("Choose an existing folder.")
-            metadata = {"folder": str(folder), "provider": provider}
-            if not title.strip():
-                title = "Untitled workstream"
-            print(bd("create", "--title", title.strip(), "-t", "task", "--metadata", json.dumps(metadata),
-                     "--silent", *(["--external-ref", reference.strip()] if reference.strip() else [])))
+            print(create_stream(*args))
         elif action == "open":
             launch(*args)
         elif action == "add-terminal":

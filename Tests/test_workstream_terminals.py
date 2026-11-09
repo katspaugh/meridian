@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -188,6 +189,111 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.live.add(key)
         self.parent['status'] = 'closed'
         self.assertEqual(streams.streams()[0]['state'], 'Done')
+
+
+class WorktreeCreationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.repo = self.root / 'source repo'
+        self.repo.mkdir()
+        self.home = self.root / 'app home'
+        self.home.mkdir()
+        self.created = []
+        self.git('init', '-b', 'main')
+        self.git('config', 'user.name', 'Test')
+        self.git('config', 'user.email', 'test@example.invalid')
+        (self.repo / 'app').mkdir()
+        (self.repo / 'app' / 'file.txt').write_text('committed\n')
+        self.git('add', '.')
+        self.git('-c', 'commit.gpgsign=false', 'commit', '-m', 'Initial')
+        for p in [patch.object(streams, 'ROOT', self.home), patch.object(streams, 'bd', side_effect=self.bd)]:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', '-C', str(cwd or self.repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def bd(self, *args):
+        if args[0] == 'create':
+            metadata = json.loads(args[args.index('--metadata') + 1])
+            key = 'mx-created-' + str(len(self.created))
+            self.created.append(dict(id=key, title='Test', status='open', metadata=metadata))
+            return key
+        if args[0] == 'show':
+            return json.dumps([next(i for i in self.created if i['id'] == args[1])])
+        return json.dumps(self.created)
+
+    def test_each_provider_gets_a_distinct_worktree_and_branch(self):
+        (self.repo / 'app' / 'file.txt').write_text('uncommitted\n')
+        (self.repo / 'untracked.txt').write_text('local only\n')
+        for provider in ('claude', 'codex'):
+            streams.create_stream('', str(self.repo), '', provider)
+        folders = [Path(i['metadata']['folder']) for i in self.created]
+        self.assertNotEqual(*folders)
+        for folder, issue in zip(folders, self.created):
+            self.assertEqual((folder / 'app' / 'file.txt').read_text(), 'committed\n')
+            self.assertFalse((folder / 'untracked.txt').exists())
+            self.assertEqual(self.git('rev-parse', 'HEAD', cwd=folder), self.git('rev-parse', 'HEAD'))
+            self.assertEqual(self.git('branch', '--show-current', cwd=folder), issue['metadata']['worktreeBranch'])
+            self.assertEqual(issue['metadata']['sourceFolder'], str(self.repo))
+        self.assertEqual(self.git('branch', '--show-current'), 'main')
+        self.assertEqual((self.repo / 'app' / 'file.txt').read_text(), 'uncommitted\n')
+
+    def test_subdirectory_and_selected_checkout_commit_are_preserved(self):
+        source = self.root / 'existing checkout'
+        self.git('worktree', 'add', '-b', 'feature/source', str(source))
+        (source / 'app' / 'file.txt').write_text('feature\n')
+        self.git('-c', 'commit.gpgsign=false', 'commit', '-am', 'Feature', cwd=source)
+        streams.create_stream('Test', str(source / 'app'), '', 'codex')
+        meta = self.created[0]['metadata']
+        folder = Path(meta['folder'])
+        self.assertEqual(folder.name, 'app')
+        self.assertEqual((folder / 'file.txt').read_text(), 'feature\n')
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=folder), self.git('rev-parse', 'HEAD', cwd=source))
+
+    def test_extra_terminals_reuse_the_created_worktree(self):
+        key = streams.create_stream('Test', str(self.repo), '', 'codex')
+        before = self.git('worktree', 'list', '--porcelain')
+        with patch.object(streams, 'terminals', return_value=set()), \
+             patch.object(streams, 'legacy_sessions', return_value=set()), \
+             patch.object(streams.shutil, 'which', return_value='/bin/agent'), \
+             patch.object(streams.shutil, 'copyfile'), patch.object(streams, 'run') as launch:
+            streams.add_terminal(key, 'shell')
+            self.assertEqual(launch.call_args.kwargs['cwd'], Path(self.created[0]['metadata']['folder']))
+            streams.add_terminal(key, 'claude')
+            self.assertEqual(launch.call_args.kwargs['cwd'], Path(self.created[0]['metadata']['folder']))
+        self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
+
+    def test_plain_folder_remains_usable(self):
+        folder = self.root / 'plain folder'
+        folder.mkdir()
+        streams.create_stream('Test', str(folder), '', 'claude')
+        self.assertEqual(self.created[0]['metadata']['folder'], str(folder))
+        self.assertNotIn('worktreeRoot', self.created[0]['metadata'])
+
+    def test_unborn_repository_and_uncommitted_subfolder_fail_before_creating_issue(self):
+        unborn = self.root / 'unborn'
+        unborn.mkdir()
+        self.git('init', cwd=unborn)
+        with self.assertRaisesRegex(ValueError, 'initial commit'):
+            streams.create_stream('Test', str(unborn), '', 'codex')
+        folder = self.repo / 'untracked'
+        folder.mkdir()
+        with self.assertRaisesRegex(ValueError, 'subfolder is not committed'):
+            streams.create_stream('Test', str(folder), '', 'claude')
+        self.assertEqual(self.created, [])
+
+    def test_issue_creation_failure_cleans_up_only_the_new_checkout(self):
+        before = self.git('worktree', 'list', '--porcelain')
+        with patch.object(streams, 'bd', side_effect=ValueError('Tracker unavailable')):
+            with self.assertRaisesRegex(ValueError, 'Tracker unavailable'):
+                streams.create_stream('Test', str(self.repo), '', 'codex')
+        self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
+        self.assertEqual(self.git('branch', '--list', 'muxteroid/*'), '')
+        self.assertEqual(list((self.home / 'worktrees').iterdir()), [])
 
 
 if __name__ == '__main__':

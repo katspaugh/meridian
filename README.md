@@ -20,6 +20,8 @@ open build/Muxteroid.app
 
 Press **⌘N**, choose your agent and working folder, and click **Create**. Give the agent a task in the terminal. It names the stream from the goal and updates the title as the work becomes clearer. A Linear reference is optional.
 
+For Git repositories, creating a workstream automatically creates a fresh `muxteroid/<id>` branch and worktree from the selected checkout’s current commit. A selected subfolder is preserved. Uncommitted changes stay in the original checkout. Both agents and any extra terminals share this one worktree. Folders outside Git are used directly; existing workstreams retain their current folders.
+
 ## Working across streams
 
 - **Switch away while your agent works.** Each session runs in its own PTY. Switch streams or quit Muxteroid and the agent process keeps running. After a reboot, Muxteroid can resume from the saved conversation.
@@ -39,7 +41,7 @@ Press **⌘N**, choose your agent and working folder, and click **Create**. Give
 
 Muxteroid uses SwiftUI and an embedded [Ghostty terminal](https://github.com/Lakr233/libghostty-spm). If Ghostty is installed, Muxteroid reads its appearance settings, including its font and colors. The embedded build does not render custom shaders. [dtach](https://github.com/crigler/dtach) keeps the process alive between attachments; scrollback belongs to the current terminal view.
 
-Workstream data lives in `~/Library/Application Support/Muxteroid`. Each Codex terminal runs its own local app-server behind a private Unix socket. Its terminal and Muxteroid observe the same thread, including approval requests, questions, replies, and loaded subagents. Selecting a subagent selects its owning terminal. Each Claude session receives its parent Beads issue and [hooks](https://code.claude.com/docs/en/hooks) for reporting activity. Plain shells receive `BEADS_DIR` and `MUXTEROID_ISSUE` for the same shared task context. Muxteroid uses the working folder you choose; adding terminals does not create worktrees. For independent changes to the same repository, choose a separate Git worktree for each stream.
+Workstream data lives in `~/Library/Application Support/Muxteroid`, with managed checkouts under `worktrees/`. Each Codex terminal runs its own local app-server behind a private Unix socket. Its terminal and Muxteroid observe the same thread, including approval requests, questions, replies, and loaded subagents. Selecting a subagent selects its owning terminal. Each Claude session receives its parent Beads issue and [hooks](https://code.claude.com/docs/en/hooks) for reporting activity. Plain shells receive `BEADS_DIR` and `MUXTEROID_ISSUE` for the same shared task context. Adding terminals reuses the stream’s worktree. Completing a stream keeps its branch and files available; it does not remove the worktree.
 
 ## Support
 

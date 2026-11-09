@@ -39,6 +39,7 @@ struct Stream: Decodable, Identifiable {
     let provider: String
     let session: String?
     let terminalSocket: String?
+    let sourceFolder, worktreeBranch: String?
     let live, nativeView: Bool
     let id, title, folder, reference, state, detail, created: String
 
@@ -245,7 +246,7 @@ struct Dashboard: View {
         if let data = try? JSONEncoder().encode(choices) { terminalSelections = String(decoding: data, as: UTF8.self) }
     }
     private var suggestedFolder: String {
-        ([lastFolder] + store.rows.sorted { $0.created > $1.created }.map(\.folder))
+        ([lastFolder] + store.rows.sorted { $0.created > $1.created }.map { $0.sourceFolder ?? $0.folder })
             .first { FileManager.default.fileExists(atPath: $0) } ?? ""
     }
 
@@ -547,6 +548,8 @@ struct NewStream: View {
                     if panel.runModal() == .OK { folder = panel.url?.path ?? "" }
                 }
             }
+            Text("Git repositories get a new branch and worktree shared by all terminals. Other folders are used directly.")
+                .font(.caption).foregroundStyle(.secondary)
             TextField("Linear issue or URL (optional)", text: $reference)
             if !store.error.isEmpty { Text(store.error).foregroundStyle(.red) }
             HStack {
@@ -555,7 +558,7 @@ struct NewStream: View {
                 Button("Create") {
                     Task {
                         if let id = await store.perform(["create", "", folder, reference, provider]) {
-                            created(id, store.rows.first { $0.id == id }?.folder ?? folder)
+                            created(id, store.rows.first { $0.id == id }?.sourceFolder ?? folder)
                             _ = await store.perform(["open", id])
                         }
                     }

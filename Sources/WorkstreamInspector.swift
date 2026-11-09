@@ -69,9 +69,13 @@ struct WorkstreamInspector: View {
                     Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
                     Text(stream.displayState).font(.callout.weight(.semibold))
                 }
-                Label(URL(fileURLWithPath: stream.folder).lastPathComponent, systemImage: "folder")
+                Label(URL(fileURLWithPath: stream.sourceFolder ?? stream.folder).lastPathComponent, systemImage: "folder")
                     .font(.callout).foregroundStyle(.secondary).help(stream.folder)
                     .accessibilityLabel(stream.folder)
+                if let branch = stream.worktreeBranch {
+                    Label(branch, systemImage: "arrow.triangle.branch")
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 if stream.terminals.count > 1 {
                     Text("\(stream.terminals.count) terminals · shared task list").font(.caption).foregroundStyle(.secondary)
                 }
