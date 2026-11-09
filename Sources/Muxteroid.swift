@@ -53,6 +53,11 @@ struct Stream: Decodable, Identifiable {
     let live, nativeView: Bool
     let id, title, folder, reference, state, detail, created: String
 
+    var sidebarProviders: [String] {
+        let providers = Set(terminals.filter { $0.live && $0.provider != "shell" }.map(\.provider))
+        return providers.isEmpty ? [provider] : providers.sorted()
+    }
+
     var needsAttention: Bool {
         state != "Done" && (state == "Needs you" || tasks.contains { $0.status == "blocked" })
     }
@@ -290,14 +295,28 @@ struct Dashboard: View {
     }
 
     private func sidebarRow(_ stream: Stream) -> some View {
-        let isCodex = stream.provider == "codex"
-        let agentName = isCodex ? "Codex" : "Claude"
+        let providers = stream.sidebarProviders
+        let agentName = providers.map { provider in
+            switch provider {
+            case "codex": return "Codex"
+            case "claude": return "Claude"
+            default: return "Terminal"
+            }
+        }.joined(separator: " + ")
         let summary = "\(stream.title) · \(agentName) · \(stream.displayState)"
         return Button {
             selectTerminal(stream, agent: nil)
         } label: {
             HStack {
-                AgentIcon(provider: stream.provider)
+                ZStack(alignment: .leading) {
+                    ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
+                        AgentIcon(provider: provider)
+                            .background(.background, in: Circle())
+                            .offset(x: -CGFloat(index) * 6)
+                            .zIndex(-Double(index))
+                    }
+                }
+                .frame(width: 16, height: 16, alignment: .leading)
                 Text(stream.title).lineLimit(2)
                 Spacer(minLength: 0)
                 Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
