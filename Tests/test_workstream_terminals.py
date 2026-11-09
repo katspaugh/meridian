@@ -77,6 +77,33 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.assertIn("mx-example.1 [in_progress]", context)
         self.assertNotIn(key, context)
 
+    def test_blocker_details_reach_app_and_update_when_resolved(self):
+        self.child.update(status="blocked", notes="Older progress notes", metadata={
+            "blocked_reason": "No mixed-provider workstream",
+            "unblock_action": "Add Claude beside Codex, then ask for verification",
+        })
+        task = streams.streams()[0]['tasks'][0]
+        self.assertEqual(task['blockedReason'], "No mixed-provider workstream")
+        self.assertEqual(task['unblockAction'], "Add Claude beside Codex, then ask for verification")
+        self.child.update(status="in_progress", metadata={})
+        task = streams.streams()[0]['tasks'][0]
+        self.assertEqual(task['status'], "in_progress")
+        self.assertIsNone(task['blockedReason'])
+        self.assertIsNone(task['unblockAction'])
+
+    def test_legacy_blocker_keeps_notes_without_inventing_an_action(self):
+        self.child.update(status="blocked", notes="Waiting for a live example")
+        task = streams.streams()[0]['tasks'][0]
+        self.assertEqual(task['notes'], "Waiting for a live example")
+        self.assertIsNone(task['blockedReason'])
+        self.assertIsNone(task['unblockAction'])
+
+    def test_agent_context_requires_actionable_blockers(self):
+        context = streams.agent_context(self.parent['id'], "SessionStart")
+        self.assertIn('--set-metadata blocked_reason=', context)
+        self.assertIn('--set-metadata unblock_action=', context)
+        self.assertIn('--unset-metadata unblock_action', context)
+
     def test_all_launchers_use_shared_folder_and_beads_with_distinct_runtime_ids(self):
         for provider in streams.PROVIDERS:
             with self.subTest(provider=provider):

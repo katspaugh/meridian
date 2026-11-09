@@ -116,10 +116,7 @@ struct SprintBoard: View {
                         Button { openStream(stream) } label: {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(task.title).font(.callout).fixedSize(horizontal: false, vertical: true)
-                                if let reason = task.blockerReason {
-                                    Text(reason).font(.caption).foregroundStyle(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
+                                TaskBlockerDetails(task: task).font(.caption)
                                 Text(task.id).font(.caption.monospaced()).foregroundStyle(.secondary)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(12)
@@ -128,6 +125,7 @@ struct SprintBoard: View {
                             .contentShape(Rectangle())
                         }.buttonStyle(.plain)
                             .accessibilityLabel("\(task.title), \(name(status)), open \(stream.title)")
+                            .accessibilityHint([task.blockerReason, task.blockerAction].compactMap { $0 }.joined(separator: ". "))
                     }
                 }.frame(width: columnWidth, alignment: .leading)
             }
