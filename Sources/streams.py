@@ -205,7 +205,7 @@ def streams():
     for issue in issues:
         if issue.get("parent"):
             children.setdefault(issue["parent"], []).append(
-                {k: issue[k] for k in ("id", "title", "status")}
+                {**{k: issue[k] for k in ("id", "title", "status")}, "notes": issue.get("notes") or ""}
             )
     rows = []
     for issue in issues:

@@ -62,8 +62,8 @@ struct WorkstreamInspector: View {
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {
-                    Circle().fill(stateColor(stream.state)).frame(width: 7, height: 7)
-                    Text(stream.state).font(.callout.weight(.semibold))
+                    Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
+                    Text(stream.displayState).font(.callout.weight(.semibold))
                 }
                 Label(URL(fileURLWithPath: stream.folder).lastPathComponent, systemImage: "folder")
                     .font(.callout).foregroundStyle(.secondary).help(stream.folder)
@@ -98,6 +98,12 @@ struct WorkstreamInspector: View {
                     .foregroundStyle(status == "closed" ? Color.secondary : Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                if let reason = task.blockerReason {
+                    Text(reason)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
             }
         }
     }

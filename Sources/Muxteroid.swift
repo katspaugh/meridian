@@ -8,6 +8,13 @@ struct Subagent: Decodable, Identifiable {
 
 struct BeadsTask: Decodable, Identifiable {
     let id, title, status: String
+    let notes: String?
+
+    var blockerReason: String? {
+        guard status == "blocked" else { return nil }
+        let reason = notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return reason.isEmpty ? "No blocker reason recorded." : reason
+    }
 }
 
 struct WorkstreamLink: Decodable, Identifiable {
@@ -25,6 +32,11 @@ struct Stream: Decodable, Identifiable {
     let terminalSocket: String?
     let live, nativeView: Bool
     let id, title, folder, reference, state, detail, created: String
+
+    var needsAttention: Bool {
+        state != "Done" && (state == "Needs you" || tasks.contains { $0.status == "blocked" })
+    }
+    var displayState: String { needsAttention ? "Needs you" : state }
 }
 
 func stateColor(_ state: String) -> Color {
@@ -50,8 +62,8 @@ enum Inbox: String, CaseIterable {
     func includes(_ stream: Stream) -> Bool {
         switch self {
         case .active: return stream.state != "Done"
-        case .attention: return stream.state == "Needs you"
-        case .review: return stream.state == "Review"
+        case .attention: return stream.needsAttention
+        case .review: return stream.state == "Review" && !stream.needsAttention
         case .done: return stream.state == "Done"
         }
     }
@@ -194,6 +206,7 @@ struct Dashboard: View {
     @ObservedObject var notifications: AttentionNotifications
     @State private var expanded: Set<Inbox> = [.active]
     @State private var adding = false
+    @State private var showingBoard = false
     @State private var selection: String?
     @State private var agentSelection: String?
     @State private var archivedAgent: String?
@@ -213,7 +226,7 @@ struct Dashboard: View {
     private func sidebarRow(_ stream: Stream) -> some View {
         let isCodex = stream.provider == "codex"
         let agentName = isCodex ? "Codex" : "Claude"
-        let summary = "\(stream.title) · \(agentName) · \(stream.state)"
+        let summary = "\(stream.title) · \(agentName) · \(stream.displayState)"
         return Button {
             selectTerminal(stream, agent: nil)
         } label: {
@@ -221,12 +234,12 @@ struct Dashboard: View {
                 AgentIcon(provider: stream.provider)
                 Text(stream.title).lineLimit(2)
                 Spacer(minLength: 0)
-                Circle().fill(stateColor(stream.state)).frame(width: 7, height: 7)
+                Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
             }
             .padding(.vertical, 3).contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(switching)
-        .listRowBackground(selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
+        .listRowBackground(!showingBoard && selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
         .accessibilityLabel(summary)
         .help(summary)
     }
@@ -251,7 +264,7 @@ struct Dashboard: View {
                     }
                     .buttonStyle(.plain).disabled(switching)
                     .help(agent.title + " · " + agent.state)
-                    .listRowBackground(selection == stream.id && agentSelection == agent.id ? Color.accentColor.opacity(0.16) : Color.clear)
+                    .listRowBackground(!showingBoard && selection == stream.id && agentSelection == agent.id ? Color.accentColor.opacity(0.16) : Color.clear)
                 }
             } label: { sidebarRow(stream) }
         }
@@ -260,6 +273,7 @@ struct Dashboard: View {
     private func selectTerminal(_ stream: Stream, agent: Subagent?) {
         WorkstreamLog.record("stream=\(stream.id) select provider=\(stream.provider) live=\(stream.live) child=\(agent != nil) switching=\(switching)")
         guard !switching else { return }
+        showingBoard = false
         terminalFocus = UUID()
         let previousStream = selection
         selection = stream.id
@@ -297,6 +311,13 @@ struct Dashboard: View {
 
     private var sidebar: some View {
         List {
+            Button { showingBoard = true } label: {
+                Label("Sprint board", systemImage: "rectangle.split.3x1")
+                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(switching)
+            .listRowBackground(showingBoard ? Color.accentColor.opacity(0.16) : Color.clear)
+            .keyboardShortcut("b", modifiers: [.command, .shift])
             ForEach(Inbox.allCases, id: \.self) { box in
                 let streams = store.rows.filter(box.includes)
                 DisclosureGroup(isExpanded: Binding(
@@ -321,7 +342,12 @@ struct Dashboard: View {
             } detail: {
                 VStack(spacing: 0) {
                     if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
-                    if let stream = selected {
+                    if showingBoard {
+                        SprintBoard(streams: store.rows, openStream: { stream in
+                            selectTerminal(stream, agent: nil)
+                            expanded.insert(stream.state == "Done" ? .done : .active)
+                        }, newStream: { adding = true })
+                    } else if let stream = selected {
                         HSplitView {
                             Group {
                                 if stream.provider == "codex", agentSelection != nil, !stream.live {
@@ -362,12 +388,13 @@ struct Dashboard: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .navigationTitle(selected?.title ?? "Workstreams")
+                .navigationTitle(showingBoard ? "Sprint board" : (selected?.title ?? "Workstreams"))
                 .toolbar {
                     Button { adding = true } label: { Label("New workstream", systemImage: "plus") }.keyboardShortcut("n")
                     Button { inspectorVisible.toggle() } label: {
                         Label(inspectorVisible ? "Hide inspector" : "Show inspector", systemImage: "sidebar.right")
                     }
+                    .disabled(showingBoard)
                     .help(inspectorVisible ? "Hide inspector" : "Show inspector")
                     .keyboardShortcut("i", modifiers: [.command, .option])
                 }
@@ -393,6 +420,7 @@ struct Dashboard: View {
         .sheet(isPresented: $adding) {
             NewStream(store: store, folder: suggestedFolder) { id, folder in
                 lastFolder = folder
+                showingBoard = false
                 selection = id
                 agentSelection = nil
                 expanded.insert(.active)
