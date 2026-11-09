@@ -10,6 +10,7 @@ import struct
 import subprocess
 import time
 
+import workstream_log as trace
 import workstream_links as links
 
 
@@ -175,11 +176,13 @@ def run(key, db, directory, beads, guide):
 
     signal.signal(signal.SIGHUP, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
+    trace.record("starting Codex app-server")
     server = subprocess.Popen(["codex", "-c", "developer_instructions="+json.dumps(guide),
                                "-c", "sandbox_workspace_write.writable_roots="+json.dumps([str(beads)]), "app-server",
                                "--listen", "unix://"+str(path)], stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
+        trace.record(f"waiting for Codex socket server_pid={server.pid}")
         for _ in range(200):
             if path.exists():
                 break
@@ -191,7 +194,9 @@ def run(key, db, directory, beads, guide):
         args = ["codex", "--remote", "unix://"+str(path)]
         if previous:
             args += ["resume",previous]
+        trace.record("Codex socket ready, starting TUI")
         tui = subprocess.Popen(args)
+        trace.record(f"Codex TUI started pid={tui.pid}")
         try:
             cache = {}
             while tui.poll() is None and server.poll() is None:

@@ -7,6 +7,8 @@ import subprocess
 import time
 import uuid
 
+import workstream_log as trace
+
 CHORD = "ctrl+x ctrl+y"
 COMMAND = "command:muxteroid-view"
 
@@ -54,7 +56,9 @@ def switch(db, root, socket_path, key, identity):
             raise ValueError("This agent belongs to an earlier Claude session.")
     token = str(uuid.uuid4())
     with (directory / "switch.lock").open("a") as lock:
+        trace.record("waiting for switch.lock")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        trace.record("acquired switch.lock")
         request = directory / "request.json"
         tmp = request.with_suffix(".tmp")
         tmp.write_text(json.dumps(dict(session=session, agent=agent, token=token)))
@@ -62,7 +66,9 @@ def switch(db, root, socket_path, key, identity):
         if ensure_shortcut():
             # Claude hot-reloads keybindings asynchronously.
             time.sleep(1)
+        trace.record("sending Claude switch shortcut")
         subprocess.run(["dtach", "-p", str(socket_path)], input=b"\x18\x19", check=True)
+        trace.record("waiting for Claude switch reply")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             try:

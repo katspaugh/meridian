@@ -22,6 +22,7 @@ struct Stream: Decodable, Identifiable {
     let links: [WorkstreamLink]
     let provider: String
     let session: String?
+    let terminalSocket: String?
     let live, nativeView: Bool
     let id, title, folder, reference, state, detail, created: String
 }
@@ -57,11 +58,19 @@ enum Inbox: String, CaseIterable {
 }
 
 enum Bridge {
-    static func run(_ args: [String]) async throws -> Data {
+    static func run(_ args: [String], traceRefresh: Bool = false) async throws -> Data {
         try await Task.detached {
             let p = Process(), output = Pipe()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
             p.arguments = [Bundle.main.url(forResource: "streams", withExtension: "py")!.path] + args
+            let action = args[0]
+            let traced = traceRefresh || ["create", "open", "view-agent"].contains(action)
+            let stream = ["open", "view-agent"].contains(action) ? args[1] : "-"
+            let context = "action=\(action) stream=\(stream)"
+            if traced {
+                WorkstreamLog.record("\(context) spawning bridge")
+                p.environment = ProcessInfo.processInfo.environment.merging(["MUXTEROID_TRACE_REFRESH": "1"]) { _, new in new }
+            }
             p.standardOutput = output
             let errors = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             FileManager.default.createFile(atPath: errors.path, contents: nil)
@@ -69,9 +78,14 @@ enum Bridge {
             let handle = try FileHandle(forWritingTo: errors)
             defer { try? handle.close() }
             p.standardError = handle
-            try p.run()
+            do { try p.run() } catch {
+                if traced { WorkstreamLog.record("\(context) bridge spawn failed") }
+                throw error
+            }
+            if traced { WorkstreamLog.record("\(context) bridge started pid=\(p.processIdentifier)") }
             let data = output.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
+            if traced { WorkstreamLog.record("\(context) bridge exited pid=\(p.processIdentifier) status=\(p.terminationStatus)") }
             if p.terminationStatus != 0 {
                 throw NSError(domain: "Muxteroid", code: Int(p.terminationStatus), userInfo: [
                     NSLocalizedDescriptionKey: (try? String(contentsOf: errors, encoding: .utf8)) ?? "Command failed."
@@ -88,11 +102,11 @@ enum Bridge {
     @Published var error = ""
     @Published var loadError = ""
     private var refreshID = 0
-    func refresh() async {
+    func refresh(traced: Bool = false) async {
         refreshID += 1
         let id = refreshID
         do {
-            let data = try await Bridge.run(["list"])
+            let data = try await Bridge.run(["list"], traceRefresh: traced)
             guard id == refreshID else { return }
             rows = try JSONDecoder().decode([Stream].self, from: data)
             loadError = ""
@@ -104,7 +118,7 @@ enum Bridge {
         defer { busy = false }
         do {
             let result = try await Bridge.run(args)
-            await refresh()
+            await refresh(traced: ["open", "create"].contains(args[0]))
             return String(decoding: result, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         } catch { self.error = error.localizedDescription; return nil }
     }
@@ -112,41 +126,64 @@ enum Bridge {
 
 @MainActor
 struct StreamTerminal: View {
-    @StateObject private var terminal: TerminalViewState
-    @State private var disconnected = false
-    let focusRequest: UUID?
+    @State var disconnected = false
+    let streamID: String
+    let appearance: String
+    var archive: String? = nil
+    var focusRequest: UUID? = nil
+    var codexChild = false
+    var socket: String? = nil
 
-    init(streamID: String, appearance: String, archive: String? = nil, focusRequest: UUID? = nil, codexChild: Bool = false) {
-        self.focusRequest = focusRequest
-        _terminal = StateObject(wrappedValue: Self.makeTerminal(streamID, appearance, archive, codexChild))
+    var body: some View {
+        if disconnected {
+            Button("Reconnect terminal") { disconnected = false }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ConnectedTerminal(options: self) { disconnected = true }
+        }
+    }
+}
+
+@MainActor
+private struct ConnectedTerminal: View {
+    @StateObject private var terminal: TerminalViewState
+    let options: StreamTerminal
+    let disconnected: () -> Void
+
+    init(options: StreamTerminal, disconnected: @escaping () -> Void) {
+        self.options = options
+        self.disconnected = disconnected
+        _terminal = StateObject(wrappedValue: Self.makeTerminal(options))
     }
 
-    private static func makeTerminal(_ streamID: String, _ appearance: String, _ archive: String?, _ codexChild: Bool) -> TerminalViewState {
-        let state = TerminalViewState(controller: TerminalController(configSource: .generated(appearance), theme: TerminalTheme()))
+    private static func makeTerminal(_ options: StreamTerminal) -> TerminalViewState {
+        let streamID = options.streamID
+        WorkstreamLog.record("stream=\(streamID) terminal controller setup begin")
+        let state = TerminalViewState(controller: TerminalController(configSource: .generated(options.appearance), theme: TerminalTheme()))
+        if let socket = options.socket {
+            let session = DtachConnection(path: socket, streamID: streamID).start()
+            state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), waitAfterCommand: false)
+            return state
+        }
         let bridge = Bundle.main.url(forResource: "streams", withExtension: "py")!
-        let arguments = archive.map { [codexChild ? "codex-child" : "agent-archive", streamID, $0] } ?? ["attach", streamID]
+        let arguments = options.archive.map { [options.codexChild ? "codex-child" : "agent-archive", streamID, $0] } ?? ["attach", streamID]
         let command = (["/usr/bin/python3", bridge.path] + arguments)
             .map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
             .joined(separator: " ")
         state.configuration = TerminalSurfaceOptions(command: command, waitAfterCommand: false)
+        WorkstreamLog.record("stream=\(streamID) terminal configured action=\(arguments[0])")
         return state
     }
 
     var body: some View {
-        Group {
-            if disconnected {
-                Button("Reconnect terminal") { disconnected = false }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                TerminalSurfaceView(context: terminal)
-                    .onAppear {
-                        terminal.onClose = { _ in disconnected = true }
-                        terminal.requestFocus()
-                    }
-                    .onChange(of: focusRequest) { terminal.requestFocus() }
-                    .onDisappear { terminal.onClose = nil }
+        TerminalSurfaceView(context: terminal)
+            .onAppear {
+                WorkstreamLog.record("stream=\(options.streamID) terminal surface appeared")
+                terminal.onClose = { _ in disconnected() }
+                terminal.requestFocus()
             }
-        }
+            .onChange(of: options.focusRequest) { terminal.requestFocus() }
+            .onDisappear { terminal.onClose = nil }
     }
 }
 
@@ -214,6 +251,7 @@ struct Dashboard: View {
     }
 
     private func selectTerminal(_ stream: Stream, agent: Subagent?) {
+        WorkstreamLog.record("stream=\(stream.id) select provider=\(stream.provider) live=\(stream.live) child=\(agent != nil) switching=\(switching)")
         guard !switching else { return }
         terminalFocus = UUID()
         let previousStream = selection
@@ -285,7 +323,7 @@ struct Dashboard: View {
                                     StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent, codexChild: stream.provider == "codex").id(archivedAgent)
                                 } else if stream.live && stream.state != "Done" {
                                     if let appearance {
-                                        StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus).id(stream.id)
+                                        StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus, socket: stream.terminalSocket).id(stream.id)
                                     } else { ProgressView() }
                                 } else if stream.state == "Done" {
                                     Label("Completed", systemImage: "checkmark.circle")
@@ -332,7 +370,9 @@ struct Dashboard: View {
         }
         .frame(minWidth: 720, minHeight: 440)
         .task {
+            WorkstreamLog.record("terminal appearance load begin")
             appearance = await GhosttyAppearance.load()
+            WorkstreamLog.record("terminal appearance load finished")
 
         }
         .onChange(of: notifications.destination, initial: true) { _, _ in selectNotification() }

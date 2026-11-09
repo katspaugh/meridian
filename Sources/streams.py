@@ -18,6 +18,7 @@ import uuid
 
 # The bridge runs inside the signed app bundle.
 sys.dont_write_bytecode = True
+import workstream_log as trace
 import workstream_links as links
 import subagents
 import agent_navigation
@@ -32,7 +33,11 @@ TERMINALS = Path("/tmp") / f"{SOCKET}-{os.getuid()}"
 
 
 def run(args, **kwargs):
+    # Full arguments can include prompts, paths and plugin settings.
+    operation = " ".join(args[:2])
+    trace.record(f"{operation} begin")
     p = subprocess.run(args, capture_output=True, text=True, **kwargs)
+    trace.record(f"{operation} exited status={p.returncode}")
     if p.returncode:
         raise ValueError(p.stderr.strip() or p.stdout.strip() or f"{args[0]} exited {p.returncode}")
     return p.stdout.strip()
@@ -46,11 +51,13 @@ def bd(*args):
 
 
 def database():
+    trace.record("activity database open")
     db = sqlite3.connect(ROOT/"activity.sqlite", timeout=10)
     db.execute("CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, session TEXT, state TEXT, detail TEXT, transcript TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
     subagents.initialize(db)
+    trace.record("activity database ready")
     return db
 
 
@@ -149,6 +156,7 @@ def terminal_directory():
 
 
 def terminals():
+    trace.record("discovering terminal sockets")
     live = set()
     for path in terminal_directory().iterdir():
         if path.name.endswith(".sock") or not path.is_socket():
@@ -170,7 +178,8 @@ def terminals():
 
 def streams():
     issues = json.loads(bd("list", "--all", "--limit", "0", "--json")) or []
-    live = terminals() | legacy_sessions()
+    attached = terminals()
+    live = attached | legacy_sessions()
     with database() as db:
         runtime = {}
         agents = {}
@@ -208,7 +217,7 @@ def streams():
             state = "Done"
         elif key in runtime and key not in live and state != "Review":
             state, detail = "Offline", "Open the terminal to continue this stream."
-        rows.append(dict(id=key, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
+        rows.append(dict(id=key, terminalSocket=str(TERMINALS / key) if key in attached else None, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
                          reference=issue.get("external_ref") or "", state=state, detail=detail, live=key in live, tasks=children.get(key, []), links=artifacts.get(key, []), agents=agents.get(key, []), session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
     return rows
 
@@ -278,6 +287,7 @@ def attach_terminal(path):
                     fcntl.ioctl(0, termios.TIOCSWINSZ, size)
         finally:
             os._exit(0)
+    trace.record("handing terminal to dtach")
     os.execvp("dtach", ["dtach", "-a", str(path), "-E", "-z", "-r", "winch"])
 
 
@@ -301,6 +311,7 @@ def main(action, *args):
         path = codex_session.endpoint(terminal_directory(),key)
         if not path.is_socket():
             raise ValueError("Start the workstream to open this subagent.")
+        trace.record("handing terminal to Codex child")
         os.execvp("codex", ["codex","--remote","unix://"+str(path),"resume",child])
     if action == "view-agent":
         key, identity = args
@@ -321,6 +332,7 @@ def main(action, *args):
             if not entries:
                 transcript.write("No messages were recorded.")
             transcript.seek(0)
+            trace.record("opening transcript pager")
             subprocess.run(["/usr/bin/less", "-+F"], stdin=transcript, env=dict(os.environ, LESSSECURE="1"))
         return
     if action == "link":
@@ -338,10 +350,13 @@ def main(action, *args):
         if path.is_socket():
             attach_terminal(path)
         if key in legacy_sessions():
+            trace.record("handing terminal to tmux")
             os.execvp("tmux", LEGACY_TMUX + ["attach-session", "-t", "=" + key])
         raise ValueError("The terminal exited. Start it again to resume the workstream.")
     with (ROOT/"bridge.lock").open("a") as lock:
+        trace.record("waiting for bridge.lock")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        trace.record("acquired bridge.lock")
         if action == "list":
             print(json.dumps(streams()))
         elif action == "create":
@@ -367,6 +382,13 @@ def main(action, *args):
 
 if __name__ == "__main__":
     try:
+        action = sys.argv[1]
+        if action in ("open", "attach", "codex-run", "codex-child", "agent-archive", "view-agent"):
+            trace.begin(action, sys.argv[2])
+        elif action == "create" or (action == "list" and os.getenv("MUXTEROID_TRACE_REFRESH") == "1"):
+            trace.begin(action, "-")
         main(*sys.argv[1:])
+        trace.record("finished")
     except Exception as exc:
+        trace.record(f"failed type={type(exc).__name__}")
         sys.exit(str(exc))
