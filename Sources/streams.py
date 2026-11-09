@@ -261,7 +261,9 @@ For implementation work, reuse matching children or create actionable steps with
 Keep all internal tasks directly under {key}. Use bd ready --parent {key} to choose unblocked work.
 Other terminals may share this workstream, folder, worktree, and task list. Check current task ownership before editing; do not overwrite another terminal's changes. Keep the parent title about the shared goal, not just your current assignment.
 Set a child in_progress when starting (bd update CHILD -s in_progress).
-Record discoveries as children, link dependencies with bd dep add BLOCKED PREREQUISITE, and record blockers with bd update CHILD -s blocked --append-notes "reason".
+Record discoveries as children and link dependencies with bd dep add BLOCKED PREREQUISITE.
+When marking a task blocked, always record both the specific missing condition and the concrete next action in the same command: bd update CHILD -s blocked --set-metadata blocked_reason="What prevents progress" --set-metadata unblock_action="Exactly what the user should do, where to do it, and how to tell the agent it is ready" --append-notes "Reason and next action". The app displays these fields under Why it’s blocked and To unblock. Use plain language, not internal IDs or vague requests to resolve the blocker. If another task or external event must finish, name it and say whether the user needs to act or just wait. For example: blocked_reason="No workstream has two different live providers to verify the overlapping icons" and unblock_action="In this workstream, use + beside the terminal tabs to add Claude alongside Codex, then tell the agent to verify the sidebar".
+Refresh both fields whenever the blocker changes. When resuming, clear them with bd update CHILD -s in_progress --unset-metadata blocked_reason --unset-metadata unblock_action. Do not mark a task blocked merely because an optional check is pending if you can still make progress.
 Close finished children with bd close CHILD --reason "outcome and verification". Before handing back, reconcile the remaining tasks and leave enough notes to resume.
 When you open or change a PR (including pushing commits), or work with a Linear issue, register its canonical URL for the workstream bar with {link_command} URL. Resolve the PR URL with gh pr view when needed.
 The user owns completion of the parent. Simple questions can be answered directly.
@@ -401,7 +403,9 @@ def streams():
     for issue in issues:
         if issue.get("parent"):
             children.setdefault(issue["parent"], []).append(
-                {**{k: issue[k] for k in ("id", "title", "status")}, "notes": issue.get("notes") or ""}
+                {**{k: issue[k] for k in ("id", "title", "status")}, "notes": issue.get("notes") or "",
+                 "blockedReason": (issue.get("metadata") or {}).get("blocked_reason"),
+                 "unblockAction": (issue.get("metadata") or {}).get("unblock_action")}
             )
     rows = []
     for issue in issues:

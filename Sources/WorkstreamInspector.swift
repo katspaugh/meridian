@@ -124,13 +124,31 @@ struct WorkstreamInspector: View {
                     .foregroundStyle(status == "closed" ? Color.secondary : Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
-                if let reason = task.blockerReason {
-                    Text(reason)
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
+                TaskBlockerDetails(task: task)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+/// Keep the explanation and next action identical in the inspector and board.
+struct TaskBlockerDetails: View {
+    let task: BeadsTask
+
+    var body: some View {
+        if let reason = task.blockerReason, let action = task.blockerAction {
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Why it’s blocked").fontWeight(.semibold)
+                    Text(reason).foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("To unblock").fontWeight(.semibold)
+                    Text(action)
                 }
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

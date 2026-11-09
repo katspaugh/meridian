@@ -17,11 +17,21 @@ struct WorkstreamTerminal: Decodable, Identifiable {
 struct BeadsTask: Decodable, Identifiable {
     let id, title, status: String
     let notes: String?
+    let blockedReason, unblockAction: String?
+
+    private func nonempty(_ value: String?) -> String? {
+        let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
 
     var blockerReason: String? {
         guard status == "blocked" else { return nil }
-        let reason = notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return reason.isEmpty ? "No blocker reason recorded." : reason
+        return nonempty(blockedReason) ?? nonempty(notes) ?? "The agent has not recorded why this task is blocked."
+    }
+
+    var blockerAction: String? {
+        guard status == "blocked" else { return nil }
+        return nonempty(unblockAction) ?? "Ask the agent in this workstream what is missing and what you need to do to continue."
     }
 }
 
