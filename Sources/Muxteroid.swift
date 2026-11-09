@@ -133,6 +133,7 @@ struct StreamTerminal: View {
     var focusRequest: UUID? = nil
     var codexChild = false
     var socket: String? = nil
+    var isCodex = false
 
     var body: some View {
         if disconnected {
@@ -161,7 +162,8 @@ private struct ConnectedTerminal: View {
         WorkstreamLog.record("stream=\(streamID) terminal controller setup begin")
         let state = TerminalViewState(controller: TerminalController(configSource: .generated(options.appearance), theme: TerminalTheme()))
         if let socket = options.socket {
-            let session = DtachConnection(path: socket, streamID: streamID).start()
+            let session = DtachConnection(path: socket, streamID: streamID)
+                .start(restoreCodexMouseReporting: options.isCodex)
             state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), waitAfterCommand: false)
             return state
         }
@@ -323,7 +325,7 @@ struct Dashboard: View {
                                     StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent, codexChild: stream.provider == "codex").id(archivedAgent)
                                 } else if stream.live && stream.state != "Done" {
                                     if let appearance {
-                                        StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus, socket: stream.terminalSocket).id(stream.id)
+                                        StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus, socket: stream.terminalSocket, isCodex: stream.provider == "codex").id(stream.id)
                                     } else { ProgressView() }
                                 } else if stream.state == "Done" {
                                     Label("Completed", systemImage: "checkmark.circle")

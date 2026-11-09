@@ -20,7 +20,7 @@ final class DtachConnection: @unchecked Sendable {
 
     deinit { socket.cancel() }
 
-    func start() -> InMemoryTerminalSession {
+    func start(restoreCodexMouseReporting: Bool) -> InMemoryTerminalSession {
         let session = InMemoryTerminalSession(write: { data in
             self.queue.async { self.sendInput(data) }
         }, resize: { size in
@@ -34,6 +34,12 @@ final class DtachConnection: @unchecked Sendable {
                 }
             }
         })
+        // dtach streams new output only. A fresh Ghostty surface misses the
+        // mouse modes Codex enabled at startup, so wheel events stay local.
+        // Seed the surface before receiving output; the TUI can change modes later.
+        if restoreCodexMouseReporting {
+            session.receive("\u{1b}[?1000h\u{1b}[?1006h")
+        }
         self.session = session
         socket.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
