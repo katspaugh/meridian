@@ -51,7 +51,7 @@ struct WorkstreamInspector: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.top, 6)
                         } label: {
-                            Text(stream.state == "Review" ? "Claude’s reply" : "Activity").font(.headline)
+                            Text(stream.state == "Review" ? (stream.provider == "codex" ? "Codex’s reply" : "Claude’s reply") : "Activity").font(.headline)
                         }
                     }
                 }

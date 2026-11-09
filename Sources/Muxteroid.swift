@@ -20,6 +20,7 @@ struct Stream: Decodable, Identifiable {
     let agents: [Subagent]
     let tasks: [BeadsTask]
     let links: [WorkstreamLink]
+    let provider: String
     let session: String?
     let live, nativeView: Bool
     let id, title, folder, reference, state, detail, created: String
@@ -115,15 +116,15 @@ struct StreamTerminal: View {
     @State private var disconnected = false
     let focusRequest: UUID?
 
-    init(streamID: String, appearance: String, archive: String? = nil, focusRequest: UUID? = nil) {
+    init(streamID: String, appearance: String, archive: String? = nil, focusRequest: UUID? = nil, codexChild: Bool = false) {
         self.focusRequest = focusRequest
-        _terminal = StateObject(wrappedValue: Self.makeTerminal(streamID, appearance, archive))
+        _terminal = StateObject(wrappedValue: Self.makeTerminal(streamID, appearance, archive, codexChild))
     }
 
-    private static func makeTerminal(_ streamID: String, _ appearance: String, _ archive: String?) -> TerminalViewState {
+    private static func makeTerminal(_ streamID: String, _ appearance: String, _ archive: String?, _ codexChild: Bool) -> TerminalViewState {
         let state = TerminalViewState(controller: TerminalController(configSource: .generated(appearance), theme: TerminalTheme()))
         let bridge = Bundle.main.url(forResource: "streams", withExtension: "py")!
-        let arguments = archive.map { ["agent-archive", streamID, $0] } ?? ["attach", streamID]
+        let arguments = archive.map { [codexChild ? "codex-child" : "agent-archive", streamID, $0] } ?? ["attach", streamID]
         let command = (["/usr/bin/python3", bridge.path] + arguments)
             .map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
             .joined(separator: " ")
@@ -219,6 +220,11 @@ struct Dashboard: View {
         selection = stream.id
         archivedAgent = nil
         if previousStream != stream.id { agentSelection = nil }
+        if stream.provider == "codex" {
+            agentSelection = agent?.id
+            archivedAgent = agent?.id
+            return
+        }
         if let agent, !stream.nativeView || !stream.live || stream.state == "Done" || !agent.id.hasPrefix((stream.session ?? "") + "/") {
             archivedAgent = agent.id
             agentSelection = agent.id
@@ -272,8 +278,10 @@ struct Dashboard: View {
                 if let stream = selected {
                     HSplitView {
                         Group {
-                            if let archivedAgent, archivedAgent == agentSelection, let appearance {
-                                StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent).id(archivedAgent)
+                            if stream.provider == "codex", agentSelection != nil, !stream.live {
+                                Text("Start the workstream terminal to open this subagent.")
+                            } else if let archivedAgent, archivedAgent == agentSelection, let appearance {
+                                StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent, codexChild: stream.provider == "codex").id(archivedAgent)
                             } else if stream.live && stream.state != "Done" {
                                 if let appearance {
                                     StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus).id(stream.id)
@@ -370,9 +378,14 @@ struct NewStream: View {
     @State var folder: String
     var created: (String, String) -> Void
     @State private var reference = ""
+    @AppStorage("newStreamProvider") private var provider = "claude"
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New workstream").font(.title2.bold())
+            Picker("Agent", selection: $provider) {
+                Text("Claude Code").tag("claude")
+                Text("Codex CLI").tag("codex")
+            }.pickerStyle(.segmented)
             HStack {
                 TextField("Working directory", text: $folder)
                 Button("Choose…") {
@@ -390,7 +403,7 @@ struct NewStream: View {
                 Button("Cancel") { store.error = ""; dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Create") {
                     Task {
-                        if let id = await store.perform(["create", "", folder, reference]) {
+                        if let id = await store.perform(["create", "", folder, reference, provider]) {
                             created(id, store.rows.first { $0.id == id }?.folder ?? folder)
                             _ = await store.perform(["open", id])
                         }

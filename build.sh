@@ -9,7 +9,7 @@ cp "$bin/Muxteroid" "$contents/MacOS/"
 for bundle in "$bin"/*.bundle; do
     cp -R "$bundle" "$contents/Resources/"
 done
-cp Sources/streams.py Sources/workstream_links.py Sources/subagents.py Sources/agent_navigation.py "$contents/Resources/"
+cp Sources/streams.py Sources/workstream_links.py Sources/subagents.py Sources/agent_navigation.py Sources/codex_session.py "$contents/Resources/"
 plugin="$contents/Resources/agent-view"
 mkdir -p "$plugin/.claude-plugin" "$plugin/hooks"
 cp Assets/agent-view/.claude-plugin/plugin.json "$plugin/.claude-plugin/"

@@ -21,6 +21,7 @@ sys.dont_write_bytecode = True
 import workstream_links as links
 import subagents
 import agent_navigation
+import codex_session
 
 ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -47,6 +48,7 @@ def bd(*args):
 def database():
     db = sqlite3.connect(ROOT/"activity.sqlite", timeout=10)
     db.execute("CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, session TEXT, state TEXT, detail TEXT, transcript TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
     subagents.initialize(db)
     return db
@@ -149,7 +151,7 @@ def terminal_directory():
 def terminals():
     live = set()
     for path in terminal_directory().iterdir():
-        if not path.is_socket():
+        if path.name.endswith(".sock") or not path.is_socket():
             continue
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
             probe.settimeout(1)
@@ -173,11 +175,16 @@ def streams():
         runtime = {}
         agents = {}
         folders = {i['id']: (i.get('metadata') or {}).get('folder') for i in issues}
+        providers = {i["id"]: (i.get("metadata") or {}).get("provider", "claude") for i in issues}
         sessions = {}
         for key, sid, state, detail, transcript in db.execute("SELECT id,session,state,detail,transcript FROM activity"):
             sessions[key] = sid
-            agents[key] = subagents.discover(db, key, sid, transcript, key in live)
             runtime[key] = state, detail
+            if providers.get(key) == "codex":
+                agents[key] = [dict(id=i,title=t,role=r,state=("Offline" if key not in live and st in ("Working","Needs you") else st),revision="")
+                               for i,t,r,st in db.execute("SELECT id,title,role,state FROM codex_children WHERE stream=?", (key,))]
+                continue
+            agents[key] = subagents.discover(db, key, sid, transcript, key in live)
             links.backfill(db, key, transcript, folders.get(key))
         for issue in issues:
             if folders[issue['id']]:
@@ -196,12 +203,12 @@ def streams():
         if issue.get("parent") or not (issue.get("metadata") or {}).get("folder"):
             continue
         key = issue["id"]
-        state, detail = runtime.get(key, ("Queued", "Open the terminal to start Claude Code."))
+        state, detail = runtime.get(key, ("Queued", "Open the terminal to start the workstream."))
         if issue["status"] == "closed":
             state = "Done"
         elif key in runtime and key not in live and state != "Review":
             state, detail = "Offline", "Open the terminal to continue this stream."
-        rows.append(dict(id=key, title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
+        rows.append(dict(id=key, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
                          reference=issue.get("external_ref") or "", state=state, detail=detail, live=key in live, tasks=children.get(key, []), links=artifacts.get(key, []), agents=agents.get(key, []), session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
     return rows
 
@@ -212,6 +219,16 @@ def launch(key):
         raise ValueError("Reopen this workstream first.")
     if key not in terminals() and key not in legacy_sessions():
         folder = Path(issue["metadata"]["folder"])
+        if issue["metadata"].get("provider") == "codex":
+            if not shutil.which("codex") or not folder.is_dir():
+                raise ValueError("Install Codex CLI and check the workstream folder.")
+            with database() as db:
+                db.execute("INSERT OR IGNORE INTO activity VALUES (?,NULL,'Ready','Opening Codex.',NULL)", (key,))
+            env = dict(os.environ, TERM="xterm-256color", TERM_PROGRAM="ghostty", COLORTERM="truecolor",
+                       BEADS_DIR=str(ROOT/".beads"), MUXTEROID_HOME=str(ROOT), MUXTEROID_ISSUE=key)
+            run(["dtach","-n",str(TERMINALS/key),"-r","winch",sys.executable,str(Path(__file__).resolve()),"codex-run",key],
+                cwd=folder,env=env,stdin=subprocess.DEVNULL)
+            return
         claude = shutil.which("claude")
         if not folder.is_dir() or not claude:
             raise ValueError("Check the workstream folder and Claude Code installation.")
@@ -267,6 +284,20 @@ def attach_terminal(path):
 def main(action, *args):
     if action == "hook":
         return hook(*args)
+    if action == "codex-run":
+        key, = args
+        with database() as db:
+            codex_session.run(key,db,terminal_directory(),ROOT/".beads",agent_context(key,"SessionStart"))
+        return
+    if action == "codex-child":
+        key, child = args
+        with database() as db:
+            if not db.execute("SELECT 1 FROM codex_children WHERE stream=? AND id=?", (key,child)).fetchone():
+                raise ValueError("Unknown Codex subagent.")
+        path = codex_session.endpoint(terminal_directory(),key)
+        if not path.is_socket():
+            raise ValueError("Start the workstream to open this subagent.")
+        os.execvp("codex", ["codex","--remote","unix://"+str(path),"resume",child])
     if action == "view-agent":
         key, identity = args
         if Path(key).name != key:
@@ -304,17 +335,20 @@ def main(action, *args):
             attach_terminal(path)
         if key in legacy_sessions():
             os.execvp("tmux", LEGACY_TMUX + ["attach-session", "-t", "=" + key])
-        raise ValueError("The terminal exited. Start it again to resume Claude.")
+        raise ValueError("The terminal exited. Start it again to resume the workstream.")
     with (ROOT/"bridge.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if action == "list":
             print(json.dumps(streams()))
         elif action == "create":
-            title, folder, reference = args
+            title, folder, reference = args[:3]
+            provider = args[3] if len(args) > 3 else "claude"
+            if provider not in ("claude","codex"):
+                raise ValueError("Unknown agent.")
             folder = Path(folder).expanduser().resolve()
             if not folder.is_dir():
                 raise ValueError("Choose an existing folder.")
-            metadata = {"folder": str(folder)}
+            metadata = {"folder": str(folder), "provider": provider}
             if not title.strip():
                 title = "Untitled workstream"
             print(bd("create", "--title", title.strip(), "-t", "task", "--metadata", json.dumps(metadata),
