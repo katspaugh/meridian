@@ -28,7 +28,7 @@ Press **⌘N**, choose your agent and working folder, and click **Create**. Give
 
   Muxteroid loads a local Claude mod in each workstream. On first use it creates a Claude Chat shortcut (`ctrl+x ctrl+y` → `command:muxteroid-view`) if no keybindings file exists. If you already have a keybindings file, add that binding to its Chat section or run `/muxteroid-view` after selecting an agent.
 - **Follow the plan.** Each agent uses [Beads](https://github.com/gastownhall/beads) to track subtasks, dependencies, and blockers under the workstream. The inspector shows progress. Press **⌥⌘I** to give the terminal the full width.
-- **Check account usage.** The bottom bar shows reported Claude and Codex usage windows. Hover for window labels or click refresh. Claude readings come from a newly started Muxteroid session or Claude’s local usage cache. A dash means no recent reading is available.
+- **Check account usage.** The bottom bar shows reported Claude and Codex usage windows. Hover for window labels or click refresh. Muxteroid queries Claude Code directly for subscription limits and can use recent cached readings when the query fails. If the footer says **Sign in**, run `claude auth login` and refresh.
 - **Jump to related work.** The bottom bar collects GitHub PRs and Linear issues from agent activity. The links stay with the stream when you reopen it.
 
 ## How it runs

@@ -30,18 +30,63 @@ def window(label, percent, reset):
     return dict(label=label, percent=percent, reset=reset)
 
 
+def claude_windows(values):
+    windows = []
+    for kind, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        value = values.get(kind)
+        if isinstance(value, dict):
+            item = window(label, value.get("utilization"), value.get("resets_at"))
+            if item:
+                windows.append(item)
+    return windows
+
+
+def claude_live():
+    request = {"type": "control_request", "request_id": "muxteroid-usage",
+               "request": {"subtype": "get_usage", "skip_behaviors": True}}
+    proc = subprocess.run(
+        ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+         "--verbose", "--no-session-persistence", "--safe-mode", "--strict-mcp-config"],
+        input=json.dumps(request) + "\n", cwd="/", stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True, timeout=12, check=True)
+    for line in proc.stdout.splitlines():
+        message = json.loads(line)
+        reply = message.get("response")
+        if message.get("type") != "control_response" or not isinstance(reply, dict):
+            continue
+        if reply.get("request_id") != request["request_id"] or reply.get("subtype") != "success":
+            continue
+        data = reply.get("response") or {}
+        windows = claude_windows(data.get("rate_limits") or {})
+        if windows:
+            return dict(windows=windows, measured=time.time())
+        if data.get("rate_limits_available") is False:
+            # auth status returns exit code 1 as well as JSON when signed out.
+            auth = subprocess.run(["claude", "auth", "status", "--json"], cwd="/",
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+            if json.loads(auth.stdout).get("loggedIn") is False:
+                return dict(windows=[], status="Sign in", hint="Run claude auth login in Terminal, then refresh usage.")
+            return dict(windows=[], status="No quota", hint="Claude does not report subscription usage windows for this sign-in.")
+    return None
+
+
 def claude(root):
+    try:
+        live = claude_live()
+        if live is not None:
+            return live
+    except FileNotFoundError:
+        return dict(windows=[], status="Not installed", hint="Install Claude Code to see account usage.")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
     snapshots = []
     config_dir = Path(os.getenv("CLAUDE_CONFIG_DIR") or Path.home()/".claude")
     config = read(config_dir/".claude.json") or read(Path.home()/".claude.json")
     cached = config.get("cachedUsageUtilization") or {}
     if cached.get("accountUuid") == (config.get("oauthAccount") or {}).get("accountUuid"):
         values = cached.get("utilization") or {}
-        windows = []
-        for kind, label in (("five_hour","5h"), ("seven_day","7d")):
-            value = values.get(kind) or {}
-            windows.append(window(label, value.get("utilization"), value.get("resets_at")))
-        snapshots.append((cached.get("fetchedAtMs", 0)/1000, windows))
+        snapshots.append((cached.get("fetchedAtMs", 0)/1000, claude_windows(values)))
     for path in (root/"views").glob("*/usage.json"):
         payload = read(path)
         if not isinstance(payload, list):
@@ -55,7 +100,7 @@ def claude(root):
         windows = [w for w in windows if w]
         if windows and time.time()-stamp < 3600:
             return dict(windows=sorted(windows,key=lambda w:w["label"]), measured=stamp)
-    return dict(windows=[], hint="Waiting for a Claude usage reading. Run /usage in Claude or use a newly started Muxteroid Claude session.")
+    return dict(windows=[], status="Unavailable", hint="Claude returned no recent usage reading. Check /usage in Claude Code, then refresh.")
 
 
 def codex():

@@ -18,6 +18,7 @@ private struct UsageWindow: Decodable {
 private struct ProviderUsage: Decodable {
     let windows: [UsageWindow]
     let measured: TimeInterval?
+    let status: String?
     let hint: String?
 }
 
@@ -86,7 +87,7 @@ struct UsageBar: View {
                     if let left = windows[index].countdown(at: now) { Text(left) }
                 }
             } else {
-                Text("—")
+                Text(reading?.status ?? "—")
             }
         }
         .monospacedDigit().fixedSize()
