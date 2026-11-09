@@ -119,6 +119,22 @@ class TerminalLifecycleTests(unittest.TestCase):
         self.send(other, b'\x04')
         self.wait_for(lambda: self.closed('other'))
 
+    def test_detaching_app_client_preserves_running_session(self):
+        key = 'test-detach'
+        connection = self.start(key)
+        connection.close()
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        replacement.settimeout(2)
+        replacement.connect(str(self.sockets / key))
+        replacement.sendall(bytes([1]) + bytes(9))
+        self.connections.append(replacement)
+        self.assertFalse(self.closed(key))
+        self.assertEqual(self.provider(key), 'codex')
+        self.send(replacement, b'\x04')
+        self.wait_for(lambda: self.provider(key) == 'shell')
+        self.send(replacement, b'\x04')
+        self.wait_for(lambda: self.closed(key))
+
 
 if __name__ == '__main__':
     unittest.main()

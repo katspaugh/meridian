@@ -179,6 +179,21 @@ struct StreamTerminal: View {
 }
 
 @MainActor
+private final class WorkstreamTerminalView: TerminalView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if event.type == .keyDown, modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "q" {
+            // Ghostty handles its own bindings before the app menu. Quit belongs
+            // to the host and must never be forwarded to the terminal process.
+            NSApp.terminate(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+@MainActor
 private struct ConnectedTerminal: View {
     @StateObject private var terminal: TerminalViewState
     let options: StreamTerminal
@@ -194,6 +209,7 @@ private struct ConnectedTerminal: View {
         let streamID = options.streamID
         WorkstreamLog.record("stream=\(streamID) terminal controller setup begin")
         let state = TerminalViewState(controller: TerminalController(configSource: .generated(options.appearance), theme: TerminalTheme()))
+        state.makePlatformView = { WorkstreamTerminalView(frame: .zero) }
         if let socket = options.socket {
             let session = DtachConnection(path: socket, streamID: streamID, onDisconnect: disconnected)
                 .start(restoreCodexMouseReporting: options.isCodex)
@@ -588,6 +604,10 @@ struct TerminalCommands: Commands {
     @FocusedValue(\.closeWorkstreamTerminal) private var closeTerminal
 
     var body: some Commands {
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit Muxteroid") { NSApp.terminate(nil) }
+                .keyboardShortcut("q", modifiers: .command)
+        }
         CommandGroup(after: .newItem) {
             Button("Close Terminal") { closeTerminal?() }
                 .keyboardShortcut("w", modifiers: .command)

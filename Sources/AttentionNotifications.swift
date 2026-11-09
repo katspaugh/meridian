@@ -16,6 +16,12 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         center.delegate = self
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Workstreams are persisted and their dtach processes outlive this UI.
+        // Quitting is not a request to close any terminal sessions.
+        .terminateNow
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task {
             do {
