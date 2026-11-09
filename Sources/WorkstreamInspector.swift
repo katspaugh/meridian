@@ -3,6 +3,7 @@ import MarkdownUI
 
 struct WorkstreamInspector: View {
     let stream: Stream
+    let terminal: WorkstreamTerminal
     let busy: Bool
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
@@ -43,10 +44,10 @@ struct WorkstreamInspector: View {
                     ForEach(groups, id: \.self) { status in
                         taskGroup(status)
                     }
-                    if !stream.detail.isEmpty && stream.detail != "Claude is continuing." && stream.detail != "Claude is working on your request." {
+                    if !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
                         Divider()
                         DisclosureGroup(isExpanded: $detailExpanded) {
-                            Markdown(stream.detail)
+                            Markdown(terminal.detail)
                                 .markdownTextStyle { FontSize(13) }
                                 .markdownImageProvider(.asset)
                                 .markdownInlineImageProvider(.asset)
@@ -54,7 +55,7 @@ struct WorkstreamInspector: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.top, 6)
                         } label: {
-                            Text(stream.state == "Review" ? (stream.provider == "codex" ? "Codex’s reply" : "Claude’s reply") : "Activity").font(.headline)
+                            Text(terminal.state == "Review" ? terminal.title + "’s reply" : "Activity").font(.headline)
                         }
                     }
                 }
@@ -71,6 +72,9 @@ struct WorkstreamInspector: View {
                 Label(URL(fileURLWithPath: stream.folder).lastPathComponent, systemImage: "folder")
                     .font(.callout).foregroundStyle(.secondary).help(stream.folder)
                     .accessibilityLabel(stream.folder)
+                if stream.terminals.count > 1 {
+                    Text("\(stream.terminals.count) terminals · shared task list").font(.caption).foregroundStyle(.secondary)
+                }
                 if !stream.reference.isEmpty { Text(stream.reference).font(.callout).textSelection(.enabled) }
                 Button(stream.state == "Done" ? "Reopen" : "Mark complete") {
                     if stream.state != "Done" && !unfinishedTasks.isEmpty {

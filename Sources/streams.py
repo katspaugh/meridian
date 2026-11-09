@@ -54,6 +54,7 @@ def database():
     trace.record("activity database open")
     db = sqlite3.connect(ROOT/"activity.sqlite", timeout=10)
     db.execute("CREATE TABLE IF NOT EXISTS activity (id TEXT PRIMARY KEY, session TEXT, state TEXT, detail TEXT, transcript TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS workstream_terminals (id TEXT PRIMARY KEY, stream TEXT NOT NULL, provider TEXT NOT NULL, title TEXT NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
     subagents.initialize(db)
@@ -61,7 +62,60 @@ def database():
     return db
 
 
+PROVIDERS = {"claude": "Claude", "codex": "Codex", "shell": "Terminal"}
+
+
+def register_original(db, issue):
+    """Keep the original socket/activity ID so running pre-upgrade sessions survive."""
+    provider = issue["metadata"].get("provider", "claude")
+    db.execute("INSERT OR IGNORE INTO workstream_terminals VALUES (?,?,?,?)",
+               (issue["id"], issue["id"], provider, PROVIDERS[provider]))
+
+
+def terminal_owner(key):
+    with database() as db:
+        row = db.execute("SELECT stream FROM workstream_terminals WHERE id=?", (key,)).fetchone()
+    return row[0] if row else key
+
+
+def terminal_issue(key):
+    parent = terminal_owner(key)
+    issue = json.loads(bd("show", parent, "--json"))[0]
+    if issue.get("parent") or not (issue.get("metadata") or {}).get("folder"):
+        raise ValueError("Not a workstream.")
+    with database() as db:
+        register_original(db, issue)
+        row = db.execute("SELECT provider FROM workstream_terminals WHERE id=? AND stream=?", (key, parent)).fetchone()
+    if not row:
+        raise ValueError("Unknown terminal.")
+    return issue, row[0]
+
+
+def add_terminal(parent, provider):
+    if provider not in PROVIDERS:
+        raise ValueError("Choose a plain terminal, Claude, or Codex.")
+    issue, _ = terminal_issue(parent)
+    if issue["id"] != parent or issue["status"] == "closed":
+        raise ValueError("Reopen this workstream before adding a terminal.")
+    key = "term-" + uuid.uuid4().hex[:16]
+    with database() as db:
+        count = db.execute("SELECT count(*) FROM workstream_terminals WHERE stream=? AND provider=?", (parent, provider)).fetchone()[0]
+        title = PROVIDERS[provider] + (f" {count + 1}" if count else "")
+        db.execute("INSERT INTO workstream_terminals VALUES (?,?,?,?)", (key, parent, provider, title))
+    try:
+        launch(key)
+    except Exception:
+        # Keep a successfully started process discoverable even if launch reporting failed.
+        if key not in terminals():
+            with database() as db:
+                db.execute("DELETE FROM workstream_terminals WHERE id=?", (key,))
+                db.execute("DELETE FROM activity WHERE id=?", (key,))
+        raise
+    return key
+
+
 def agent_context(key, event):
+    key = terminal_owner(key)
     # Always provide an explicit tracker path. Already-running sessions predate the
     # workstream environment below, and a working directory can have its own database.
     cli = "BEADS_DIR=" + shlex.quote(str(ROOT/".beads")) + " " + shlex.quote(shutil.which("bd") or "bd")
@@ -73,6 +127,7 @@ Maintain the parent title as a short semantic summary of the current goal. As so
 Reconsider the title when a clarification or investigation reveals a more accurate goal. Update it in that same turn, including when the change becomes clear midway through the work. Keep an accurate title through routine progress. Honor any title the user explicitly asks to keep.
 For implementation work, reuse matching children or create actionable steps with bd create --parent {key} -t task --title "step".
 Keep all internal tasks directly under {key}. Use bd ready --parent {key} to choose unblocked work.
+Other terminals may share this workstream, folder, worktree, and task list. Check current task ownership before editing; do not overwrite another terminal's changes. Keep the parent title about the shared goal, not just your current assignment.
 Set a child in_progress when starting (bd update CHILD -s in_progress).
 Record discoveries as children, link dependencies with bd dep add BLOCKED PREREQUISITE, and record blockers with bd update CHILD -s blocked --append-notes "reason".
 Close finished children with bd close CHILD --reason "outcome and verification". Before handing back, reconcile the remaining tasks and leave enough notes to resume.
@@ -183,24 +238,32 @@ def streams():
     with database() as db:
         runtime = {}
         agents = {}
-        folders = {i['id']: (i.get('metadata') or {}).get('folder') for i in issues}
-        providers = {i["id"]: (i.get("metadata") or {}).get("provider", "claude") for i in issues}
+        parents = {i['id']: i for i in issues if not i.get('parent') and (i.get('metadata') or {}).get('folder')}
+        for issue in parents.values():
+            register_original(db, issue)
+        registry = list(db.execute("SELECT id,stream,provider,title FROM workstream_terminals ORDER BY rowid"))
+        owners = {key: parent for key, parent, _, _ in registry}
+        providers = {key: provider for key, _, provider, _ in registry}
+        folders = {key: parents[parent]['metadata']['folder'] for key, parent, _, _ in registry if parent in parents}
         sessions = {}
         for key, sid, state, detail, transcript in db.execute("SELECT id,session,state,detail,transcript FROM activity"):
             sessions[key] = sid
             runtime[key] = state, detail
+            if providers.get(key) == "shell":
+                continue
             if providers.get(key) == "codex":
                 agents[key] = [dict(id=i,title=t,role=r,state=("Offline" if key not in live and st in ("Working","Needs you") else st),revision="")
                                for i,t,r,st in db.execute("SELECT id,title,role,state FROM codex_children WHERE stream=?", (key,))]
                 continue
             agents[key] = subagents.discover(db, key, sid, transcript, key in live)
             links.backfill(db, key, transcript, folders.get(key))
-        for issue in issues:
-            if folders[issue['id']]:
-                links.collect(db, issue['id'], issue.get('external_ref') or '')
+        for issue in parents.values():
+            links.collect(db, issue['id'], issue.get('external_ref') or '')
         artifacts = {}
         for key, kind, label, url in db.execute("SELECT stream,kind,label,url FROM links ORDER BY kind DESC,rowid"):
-            artifacts.setdefault(key, []).append(dict(kind=kind, label=label, url=url))
+            items = artifacts.setdefault(owners.get(key, key), [])
+            if not any(item['url'] == url for item in items):
+                items.append(dict(kind=kind, label=label, url=url))
     children = {}
     for issue in issues:
         if issue.get("parent"):
@@ -212,29 +275,57 @@ def streams():
         if issue.get("parent") or not (issue.get("metadata") or {}).get("folder"):
             continue
         key = issue["id"]
-        state, detail = runtime.get(key, ("Queued", "Open the terminal to start the workstream."))
+        entries = []
+        for tid, parent, provider, title in registry:
+            if parent != key:
+                continue
+            state, detail = runtime.get(tid, ("Queued", "Open the terminal to start."))
+            if tid in runtime and tid not in live and (state != "Review" or provider == "shell"):
+                state, detail = "Offline", "Start this terminal to continue."
+            sid = sessions.get(tid)
+            entries.append(dict(id=tid, title=title, provider=provider, state=state, detail=detail,
+                                live=tid in live, terminalSocket=str(TERMINALS / tid) if tid in attached else None,
+                                session=sid, nativeView=bool(sid and (ROOT/"views"/sid).is_dir()),
+                                agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])]))
+        # An idle shell does not mask finished agent work. A working agent does.
+        priority = {"Needs you": 0, "Working": 1, "Review": 2, "Ready": 3, "Queued": 4, "Offline": 5}
+        representative = min(entries, key=lambda t: priority.get(t['state'], 6))
+        state, detail = representative['state'], representative['detail']
         if issue["status"] == "closed":
             state = "Done"
-        elif key in runtime and key not in live and state != "Review":
-            state, detail = "Offline", "Open the terminal to continue this stream."
         rows.append(dict(id=key, terminalSocket=str(TERMINALS / key) if key in attached else None, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
-                         reference=issue.get("external_ref") or "", state=state, detail=detail, live=key in live, tasks=children.get(key, []), links=artifacts.get(key, []), agents=agents.get(key, []), session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
+                         reference=issue.get("external_ref") or "", state=state, detail=detail, live=any(t['live'] for t in entries), tasks=children.get(key, []), links=artifacts.get(key, []),
+                         agents=[a for t in entries for a in t['agents']], terminals=entries,
+                         session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
     return rows
 
 
 def launch(key):
-    issue = json.loads(bd("show", key, "--json"))[0]
+    issue, provider = terminal_issue(key)
     if issue["status"] == "closed":
         raise ValueError("Reopen this workstream first.")
     if key not in terminals() and key not in legacy_sessions():
         folder = Path(issue["metadata"]["folder"])
-        if issue["metadata"].get("provider") == "codex":
+        if not folder.is_dir():
+            raise ValueError("Check the workstream folder.")
+        if not shutil.which("dtach"):
+            raise ValueError("Install dtach with brew install dtach to start the terminal.")
+        env = dict(os.environ, TERM="xterm-256color", TERM_PROGRAM="ghostty", COLORTERM="truecolor",
+                   BEADS_DIR=str(ROOT/".beads"), MUXTEROID_HOME=str(ROOT), MUXTEROID_ISSUE=issue['id'], MUXTEROID_TERMINAL=key)
+        for name in ("TMUX", "TMUX_PANE", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+            env.pop(name, None)
+        if provider == "shell":
+            shell = os.environ.get("SHELL") or "/bin/zsh"
+            with database() as db:
+                db.execute("INSERT OR REPLACE INTO activity VALUES (?,NULL,'Ready','Shell is ready.',NULL)", (key,))
+            run(["dtach", "-n", str(TERMINALS/key), "-r", "winch", shell, "-l"],
+                cwd=folder, env=env, stdin=subprocess.DEVNULL)
+            return
+        if provider == "codex":
             if not shutil.which("codex") or not folder.is_dir():
                 raise ValueError("Install Codex CLI and check the workstream folder.")
             with database() as db:
                 db.execute("INSERT OR IGNORE INTO activity VALUES (?,NULL,'Ready','Opening Codex.',NULL)", (key,))
-            env = dict(os.environ, TERM="xterm-256color", TERM_PROGRAM="ghostty", COLORTERM="truecolor",
-                       BEADS_DIR=str(ROOT/".beads"), MUXTEROID_HOME=str(ROOT), MUXTEROID_ISSUE=key)
             run(["dtach","-n",str(TERMINALS/key),"-r","winch",sys.executable,str(Path(__file__).resolve()),"codex-run",key],
                 cwd=folder,env=env,stdin=subprocess.DEVNULL)
             return
@@ -248,10 +339,6 @@ def launch(key):
             db.execute("INSERT OR REPLACE INTO activity VALUES (?,?,?,?,?)",
                        (key, sid, "Ready", "Opening Claude Code.", old[1] if resume else None))
         args = [claude, "--resume" if resume else "--session-id", sid, "--settings", settings(key, sid)]
-        if not shutil.which("dtach"):
-            raise ValueError("Install dtach with brew install dtach to start the terminal.")
-        env = dict(os.environ, TERM="xterm-256color", TERM_PROGRAM="ghostty", COLORTERM="truecolor",
-                   BEADS_DIR=str(ROOT/".beads"), MUXTEROID_HOME=str(ROOT), MUXTEROID_ISSUE=key)
         view_dir = ROOT / "views" / sid
         view_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         env["MUXTEROID_VIEW_DIR"] = str(view_dir)
@@ -374,6 +461,8 @@ def main(action, *args):
                      "--silent", *(["--external-ref", reference.strip()] if reference.strip() else [])))
         elif action == "open":
             launch(*args)
+        elif action == "add-terminal":
+            print(add_terminal(*args))
         elif action in ("close", "reopen"):
             bd(action, *args)
         else:

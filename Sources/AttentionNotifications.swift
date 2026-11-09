@@ -6,6 +6,7 @@ import OSLog
 @MainActor
 final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, ObservableObject {
     @Published var destination: String?
+    var terminalDestination: String?
     let store = Store()
     private let center = UNUserNotificationCenter.current()
     private let defaultsKey = "presentedAttentionRequests"
@@ -34,13 +35,15 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
 
     private func update(_ streams: [Stream]) async {
         var presented = Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
-        var requests: [String: (Stream, String)] = [:]
+        var requests: [String: (Stream, String, String)] = [:]
         for stream in streams where stream.state != "Done" && stream.live {
-            if stream.state == "Needs you" {
-                requests[stream.id] = (stream, stream.detail)
-            }
-            for agent in stream.agents where agent.state == "Needs you" {
-                requests[stream.id + "/" + agent.id] = (stream, agent.title + " needs your attention.")
+            for terminal in stream.terminals where terminal.live {
+                if terminal.state == "Needs you" {
+                    requests[terminal.id] = (stream, terminal.title + ": " + terminal.detail, terminal.id)
+                }
+                for agent in terminal.agents where agent.state == "Needs you" {
+                    requests[terminal.id + "/" + agent.id] = (stream, agent.title + " needs your attention.", terminal.id)
+                }
             }
         }
         let cleared = presented.subtracting(requests.keys)
@@ -52,13 +55,13 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         let new = Set(requests.keys).subtracting(presented)
         if !new.isEmpty, await center.notificationSettings().authorizationStatus == .authorized {
             for id in new.sorted() {
-                guard let (stream, reason) = requests[id] else { continue }
+                guard let (stream, reason, terminalID) = requests[id] else { continue }
                 let content = UNMutableNotificationContent()
                 content.title = stream.title
                 content.subtitle = "Needs you"
                 content.body = reason
                 content.threadIdentifier = stream.id
-                content.userInfo = ["stream": stream.id]
+                content.userInfo = ["stream": stream.id, "terminal": terminalID]
                 content.sound = .default
                 do {
                     try await center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
@@ -84,6 +87,7 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
               let id = response.notification.request.content.userInfo["stream"] as? String else { return }
         await MainActor.run {
+            terminalDestination = response.notification.request.content.userInfo["terminal"] as? String
             destination = id
             NSApp.activate(ignoringOtherApps: true)
         }

@@ -4,6 +4,14 @@ import GhosttyTerminal
 
 struct Subagent: Decodable, Identifiable {
     let id, title, role, state, revision: String
+    let terminalID: String
+}
+
+struct WorkstreamTerminal: Decodable, Identifiable {
+    let id, title, provider, state, detail: String
+    let session, terminalSocket: String?
+    let live, nativeView: Bool
+    let agents: [Subagent]
 }
 
 struct BeadsTask: Decodable, Identifiable {
@@ -24,6 +32,7 @@ struct WorkstreamLink: Decodable, Identifiable {
 }
 
 struct Stream: Decodable, Identifiable {
+    let terminals: [WorkstreamTerminal]
     let agents: [Subagent]
     let tasks: [BeadsTask]
     let links: [WorkstreamLink]
@@ -146,6 +155,7 @@ struct StreamTerminal: View {
     var codexChild = false
     var socket: String? = nil
     var isCodex = false
+    var visible = true
 
     var body: some View {
         if disconnected {
@@ -194,9 +204,14 @@ private struct ConnectedTerminal: View {
             .onAppear {
                 WorkstreamLog.record("stream=\(options.streamID) terminal surface appeared")
                 terminal.onClose = { _ in disconnected() }
-                terminal.requestFocus()
+                terminal.isSurfaceVisible = options.visible
+                if options.visible { terminal.requestFocus() }
             }
-            .onChange(of: options.focusRequest) { terminal.requestFocus() }
+            .onChange(of: options.focusRequest) { if options.visible { terminal.requestFocus() } }
+            .onChange(of: options.visible) {
+                terminal.isSurfaceVisible = options.visible
+                if options.visible { terminal.requestFocus() }
+            }
             .onDisappear { terminal.onClose = nil }
     }
 }
@@ -209,6 +224,7 @@ struct Dashboard: View {
     @State private var showingBoard = false
     @State private var selection: String?
     @State private var agentSelection: String?
+    @AppStorage("selectedWorkstreamTerminals") private var terminalSelections = "{}"
     @State private var archivedAgent: String?
     @State private var switching = false
     @State private var terminalFocus = UUID()
@@ -218,6 +234,16 @@ struct Dashboard: View {
     @AppStorage("lastWorkstreamFolder") private var lastFolder = ""
 
     private var selected: Stream? { store.rows.first { $0.id == selection } }
+    private func selectedTerminal(_ stream: Stream) -> WorkstreamTerminal {
+        let choices = (try? JSONDecoder().decode([String: String].self, from: Data(terminalSelections.utf8))) ?? [:]
+        return stream.terminals.first { $0.id == choices[stream.id] } ?? stream.terminals[0]
+    }
+
+    private func rememberTerminal(_ terminalID: String, in stream: Stream) {
+        var choices = (try? JSONDecoder().decode([String: String].self, from: Data(terminalSelections.utf8))) ?? [:]
+        choices[stream.id] = terminalID
+        if let data = try? JSONEncoder().encode(choices) { terminalSelections = String(decoding: data, as: UTF8.self) }
+    }
     private var suggestedFolder: String {
         ([lastFolder] + store.rows.sorted { $0.created > $1.created }.map(\.folder))
             .first { FileManager.default.fileExists(atPath: $0) } ?? ""
@@ -271,25 +297,27 @@ struct Dashboard: View {
     }
 
     private func selectTerminal(_ stream: Stream, agent: Subagent?) {
-        WorkstreamLog.record("stream=\(stream.id) select provider=\(stream.provider) live=\(stream.live) child=\(agent != nil) switching=\(switching)")
         guard !switching else { return }
+        if let agent { rememberTerminal(agent.terminalID, in: stream) }
+        let terminal = selectedTerminal(stream)
+        WorkstreamLog.record("stream=\(stream.id) terminal=\(terminal.id) select provider=\(terminal.provider) live=\(terminal.live) child=\(agent != nil)")
         showingBoard = false
         terminalFocus = UUID()
         let previousStream = selection
         selection = stream.id
         archivedAgent = nil
         if previousStream != stream.id { agentSelection = nil }
-        if stream.provider == "codex" {
+        if terminal.provider == "codex" {
             agentSelection = agent?.id
             archivedAgent = agent?.id
             return
         }
-        if let agent, !stream.nativeView || !stream.live || stream.state == "Done" || !agent.id.hasPrefix((stream.session ?? "") + "/") {
+        if let agent, !terminal.nativeView || !terminal.live || stream.state == "Done" || !agent.id.hasPrefix((terminal.session ?? "") + "/") {
             archivedAgent = agent.id
             agentSelection = agent.id
             return
         }
-        if agent == nil && (!stream.live || !stream.nativeView || stream.agents.isEmpty || stream.state == "Done") {
+        if agent == nil && (!terminal.live || !terminal.nativeView || terminal.agents.isEmpty || stream.state == "Done") {
             agentSelection = nil
             return
         }
@@ -297,7 +325,7 @@ struct Dashboard: View {
         Task {
             defer { switching = false }
             do {
-                let result = try await Bridge.run(["view-agent", stream.id, agent?.id ?? ""])
+                let result = try await Bridge.run(["view-agent", terminal.id, agent?.id ?? ""])
                 guard selection == stream.id else { return }
                 agentSelection = agent?.id
                 if String(decoding: result, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "archive" {
@@ -305,6 +333,29 @@ struct Dashboard: View {
                 }
             } catch {
                 store.error = error.localizedDescription
+            }
+        }
+    }
+
+    private func terminalBar(_ stream: Stream) -> some View {
+        WorkstreamTerminalBar(terminals: stream.terminals, selectedID: selectedTerminal(stream).id,
+                              switching: switching, canAdd: !store.busy && !switching && stream.state != "Done",
+                              select: { terminal in
+            rememberTerminal(terminal.id, in: stream)
+            agentSelection = nil
+            selectTerminal(stream, agent: nil)
+        }, add: { provider in addTerminal(provider, to: stream) })
+    }
+
+    private func addTerminal(_ provider: String, to stream: Stream) {
+        Task {
+            if let id = await store.perform(["add-terminal", stream.id, provider]), !id.isEmpty {
+                rememberTerminal(id, in: stream)
+                if selection == stream.id {
+                    agentSelection = nil
+                    archivedAgent = nil
+                    terminalFocus = UUID()
+                }
             }
         }
     }
@@ -348,22 +399,37 @@ struct Dashboard: View {
                             expanded.insert(stream.state == "Done" ? .done : .active)
                         }, newStream: { adding = true })
                     } else if let stream = selected {
+                        let terminal = selectedTerminal(stream)
                         HSplitView {
-                            Group {
-                                if stream.provider == "codex", agentSelection != nil, !stream.live {
+                            VStack(spacing: 0) {
+                                terminalBar(stream)
+                                Divider()
+                                ZStack {
+                                if let appearance, stream.state != "Done" {
+                                    ForEach(stream.terminals.filter(\.live)) { entry in
+                                        let visible = entry.id == terminal.id && archivedAgent == nil
+                                        StreamTerminal(streamID: entry.id, appearance: appearance,
+                                                       focusRequest: terminalFocus, socket: entry.terminalSocket,
+                                                       isCodex: entry.provider == "codex", visible: visible)
+                                            .id(entry.id)
+                                            .opacity(visible ? 1 : 0)
+                                            .allowsHitTesting(visible)
+                                            .accessibilityHidden(!visible)
+                                    }
+                                }
+                                if terminal.provider == "codex", agentSelection != nil, !terminal.live {
                                     Text("Start the workstream terminal to open this subagent.")
                                 } else if let archivedAgent, archivedAgent == agentSelection, let appearance {
-                                    StreamTerminal(streamID: stream.id, appearance: appearance, archive: archivedAgent, codexChild: stream.provider == "codex").id(archivedAgent)
-                                } else if stream.live && stream.state != "Done" {
-                                    if let appearance {
-                                        StreamTerminal(streamID: stream.id, appearance: appearance, focusRequest: terminalFocus, socket: stream.terminalSocket, isCodex: stream.provider == "codex").id(stream.id)
-                                    } else { ProgressView() }
+                                    StreamTerminal(streamID: terminal.id, appearance: appearance, archive: archivedAgent, codexChild: terminal.provider == "codex").id(archivedAgent)
+                                } else if terminal.live && stream.state != "Done" {
+                                    if appearance == nil { ProgressView() }
                                 } else if stream.state == "Done" {
                                     Label("Completed", systemImage: "checkmark.circle")
                                 } else {
-                                    Button("Start terminal") { Task { _ = await store.perform(["open", stream.id]) } }
+                                    Button("Start terminal") { Task { _ = await store.perform(["open", terminal.id]) } }
                                         .buttonStyle(.borderedProminent).disabled(store.busy)
                                 }
+                                }.frame(maxWidth: .infinity, maxHeight: .infinity)
                             }.frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
                             if inspectorVisible {
                                 inspector(stream).id(stream.id).frame(minWidth: 218, idealWidth: 285, maxWidth: 410)
@@ -435,13 +501,17 @@ struct Dashboard: View {
     private func selectNotification() {
         guard let id = notifications.destination,
               let stream = store.rows.first(where: { $0.id == id }) else { return }
+        if let terminalID = notifications.terminalDestination {
+            rememberTerminal(terminalID, in: stream)
+        }
         selectTerminal(stream, agent: nil)
         expanded.insert(stream.state == "Done" ? .done : .active)
         notifications.destination = nil
+        notifications.terminalDestination = nil
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, busy: store.busy) { keepTasksOpen in
+        WorkstreamInspector(stream: stream, terminal: selectedTerminal(stream), busy: store.busy) { keepTasksOpen in
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
