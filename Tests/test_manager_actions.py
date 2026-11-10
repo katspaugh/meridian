@@ -194,6 +194,13 @@ class TellTests(Fixture):
         self.run.side_effect = [None, subprocess.CalledProcessError(1, "dtach")]
         self.assertFalse(manager.tell(self.bridge, "t1", "Go on."))
 
+    def test_a_hung_dtach_times_out_as_a_refused_tell(self):
+        self.run.side_effect = subprocess.TimeoutExpired("dtach", 10)
+        self.assertFalse(manager.tell(self.bridge, "t1", "Go on."))
+        self.run.side_effect = None
+        self.assertTrue(manager.tell(self.bridge, "t1", "Go on."))
+        self.assertEqual([c.kwargs["timeout"] for c in self.run.call_args_list[1:]], [10, 10])
+
 
 class RestartTests(Fixture):
     def test_restart_launches_under_the_lock(self):
@@ -254,6 +261,30 @@ class SignatureTests(Fixture):
         self.assertNotEqual(manager.signature(rows), first)
         rows.append(self.stream(id="w2", terminals=[self.terminal("c2", "codex", "Review", "w2")]))
         self.assertEqual(manager.signature(list(reversed(rows))), manager.signature(rows))
+
+    def test_signature_ignores_terminals_hooks_already_cover(self):
+        rows = [self.stream(terminals=[self.terminal("c1", "codex", "Review"), self.terminal("t1", "claude", "Working"),
+                                       self.terminal("s1", "shell", "Offline")])]
+        first = manager.signature(rows)
+        for state in ("Review", "Needs you", "Ready"):
+            rows[0]["terminals"][1]["state"] = state
+            self.assertEqual(manager.signature(rows), first)
+        rows[0]["terminals"][2]["state"] = "Ready"
+        self.assertEqual(manager.signature(rows), first)
+        rows[0]["terminals"][1]["state"] = "Offline"
+        self.assertNotEqual(manager.signature(rows), first)
+
+    def test_a_recurring_wait_is_due_again(self):
+        self.rows = [self.stream(terminals=[self.terminal("c1", "codex", "Review")])]
+        self.consult.return_value = {"summary": "Nudged.", "briefing": "Moving.", "actions": []}
+        manager.sweep(self.bridge)
+        with self.db() as db:
+            store.set_setting(db, "sweep_time", str(time.time() - 121))
+        self.assertIs(manager.state(self.bridge)["sweepDue"], False)
+        self.rows[0]["terminals"][0]["state"] = "Working"
+        self.assertIs(manager.state(self.bridge)["sweepDue"], False)
+        self.rows[0]["terminals"][0]["state"] = "Review"
+        self.assertIs(manager.state(self.bridge)["sweepDue"], True)
 
     def test_overall_signature_covers_every_stream(self):
         rows = [self.stream(), self.stream(id="w2", state="Done")]
@@ -359,6 +390,45 @@ class SweepTests(Fixture):
         manager.sweep(self.bridge)
         self.assertEqual(self.setting("briefing"), "Two streams moving.")
 
+    def test_a_paused_sweep_briefs_and_asks_but_does_not_act(self):
+        with self.db() as db:
+            store.set_setting(db, "paused", "1")
+        self.consult.return_value = self.reply(
+            [{"terminal": "c1", "action": "tell", "message": "Run the tests."},
+             {"terminal": "t3", "action": "restart", "message": ""}],
+            asks=[{"stream": "w1", "terminal": "c1", "summary": "Ship it?", "options": [], "recommendation": ""}])
+        manager.sweep(self.bridge)
+        self.run.assert_not_called()
+        self.assertEqual((self.bridge.launched, self.events()), ([], []))
+        self.assertEqual(self.setting("briefing"), "Two streams moving.")
+        self.assertEqual([a["summary"] for a in manager.state(self.bridge)["asks"]], ["Ship it?"])
+
+    def test_sweep_tells_count_as_nudges_and_stop_at_the_loop_guard(self):
+        self.consult.return_value = self.reply([{"terminal": "c1", "action": "tell", "message": "Run the tests."}])
+        for _ in range(store.MAX_NUDGES + 1):
+            manager.sweep(self.bridge)
+        with self.db() as db:
+            self.assertEqual(store.nudges(db, "c1"), store.MAX_NUDGES)
+        self.assertEqual(len(self.typed()), 2 * store.MAX_NUDGES)
+        self.assertEqual(len(self.events()), store.MAX_NUDGES)
+
+    def test_a_sweep_is_not_due_while_it_runs(self):
+        due = []
+        self.consult.side_effect = lambda *a, **k: due.append(manager.state(self.bridge)["sweepDue"])
+        self.assertIs(manager.state(self.bridge)["sweepDue"], True)
+        manager.sweep(self.bridge)
+        self.assertEqual(due, [False])
+
+    def test_one_failing_action_does_not_stop_the_others(self):
+        self.run.side_effect = RuntimeError("unexpected")
+        self.consult.return_value = self.reply([{"terminal": "c1", "action": "tell", "message": "Run the tests."},
+                                                {"terminal": "t3", "action": "restart", "message": ""}],
+                                               remember=["Note."])
+        manager.sweep(self.bridge)
+        self.assertEqual(self.bridge.launched, ["t3"])
+        self.assertEqual([e[3] for e in self.events()], ["restart"])
+        self.remember.assert_called_once_with(self.root, ["Note."])
+
 
 class OverviewTests(Fixture):
     def test_overview_keeps_agent_text_inside_untrusted_blocks(self):
@@ -453,6 +523,25 @@ class ChatTests(Fixture):
         self.remember.assert_called_once_with(self.root, ["Boss prefers SQLite."])
         self.assertEqual([(m["role"], m["text"]) for m in self.chat()],
                          [("user", "Tell the checkout agent to use SQLite."), ("manager", "Told it to use SQLite.")])
+
+    def test_chat_acts_while_paused_and_its_tells_are_not_nudges_or_limited(self):
+        with self.db() as db:
+            store.set_setting(db, "paused", "1")
+            for _ in range(store.MAX_NUDGES):
+                store.add_nudge(db, "t1")
+        self.consult.return_value = {"reply": "Done.", "actions": [{"terminal": "t1", "action": "tell", "message": "Go."}]}
+        manager.chat(self.bridge, "Tell it to go.")
+        self.assertEqual(len(self.typed()), 2)
+        with self.db() as db:
+            self.assertEqual(store.nudges(db, "t1"), store.MAX_NUDGES)
+
+    def test_a_failing_action_keeps_the_reply_and_the_notes(self):
+        self.run.side_effect = RuntimeError("unexpected")
+        self.consult.return_value = {"reply": "On it.", "remember": ["Note."],
+                                     "actions": [{"terminal": "t1", "action": "tell", "message": "Go."}]}
+        manager.chat(self.bridge, "Tell it to go.")
+        self.assertEqual([m["role"] for m in self.chat()], ["user", "manager"])
+        self.remember.assert_called_once_with(self.root, ["Note."])
 
 
 class BridgeActionTests(unittest.TestCase):

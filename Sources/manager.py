@@ -303,10 +303,11 @@ def _hooks_cannot_see(terminal):
 
 
 def signature(rows):
-    picked = [[str(row.get("id") or ""), _pairs(row.get("terminals"), "id", "state"), _pairs(row.get("tasks"), "id", "status")]
-              for row in rows if row.get("state") != "Done"
-              and any(task.get("status") != "closed" for task in row.get("tasks") or [])
-              and any(_hooks_cannot_see(t) for t in row.get("terminals") or [])]
+    picked = []
+    for row in rows:
+        waiting = [t for t in row.get("terminals") or [] if _hooks_cannot_see(t)]
+        if row.get("state") != "Done" and waiting and any(task.get("status") != "closed" for task in row.get("tasks") or []):
+            picked.append([str(row.get("id") or ""), _pairs(waiting, "id", "state"), _pairs(row.get("tasks"), "id", "status")])
     return _digest(sorted(picked)) if picked else ""
 
 
@@ -325,11 +326,14 @@ def _number(value):
 def state(bridge):
     with bridge.bridge_lock():
         rows = bridge.streams()
+    due = signature(rows)
     with transaction(bridge) as db:
         result = store.state(db)
         swept, sweep_time, briefed = (store.setting(db, key) for key in
                                       ("sweep_signature", "sweep_time", "briefing_signature"))
-    due = signature(rows)
+        if not due and swept:
+            # Nothing is waiting now, so the same wait coming back later is new and due again.
+            store.set_setting(db, "sweep_signature", "")
     result["sweepDue"] = bool(not result["paused"] and due and due != swept
                               and time.time() - _number(sweep_time) >= SWEEP_INTERVAL)
     result["briefingStale"] = briefed != overall_signature(rows)
@@ -357,9 +361,10 @@ def tell(bridge, terminal, text):
         store.note_tell(db, terminal, text)
     path = str(bridge.TERMINALS / terminal)
     try:
-        subprocess.run(["dtach", "-p", path], input=b"\x1b[200~" + text.encode() + b"\x1b[201~", check=True)
+        subprocess.run(["dtach", "-p", path], input=b"\x1b[200~" + text.encode() + b"\x1b[201~", check=True,
+                       timeout=10)
         time.sleep(0.3)
-        subprocess.run(["dtach", "-p", path], input=b"\r", check=True)
+        subprocess.run(["dtach", "-p", path], input=b"\r", check=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return False
     return True
@@ -390,35 +395,50 @@ def _act(bridge, reply, known, trigger, summary, exclude=None):
     for item in reply.get("actions") if isinstance(reply.get("actions"), list) else []:
         if not isinstance(item, dict) or not isinstance(item.get("terminal"), str) or item["terminal"] not in known:
             continue
-        terminal, action, message = item["terminal"], item.get("action"), str(item.get("message") or "")
-        if action == "tell":
-            done = terminal != exclude and tell(bridge, terminal, message)
-        elif action == "restart":
-            done = restart(bridge, terminal)
-        else:
-            continue
-        if done:
-            stream = bridge.terminal_owner(terminal)
-            with transaction(bridge) as db:
-                store.record_event(db, stream, terminal, trigger, action, summary, {"message": message})
+        try:
+            _act_one(bridge, item, trigger, summary, exclude)
+        except Exception:
+            pass  # One action that fails must not cost the others.
+
+
+def _act_one(bridge, item, trigger, summary, exclude):
+    terminal, action, message = item["terminal"], item.get("action"), str(item.get("message") or "")
+    # Sweep tells count towards the loop guard; tells the boss asked for in chat do not.
+    guarded = trigger == "sweep" and action == "tell"
+    if guarded:
+        with transaction(bridge) as db:
+            if store.nudges(db, terminal) >= store.MAX_NUDGES:
+                return
+    if action == "tell":
+        done = terminal != exclude and tell(bridge, terminal, message)
+    elif action == "restart":
+        done = restart(bridge, terminal)
+    else:
+        return
+    if done:
+        stream = bridge.terminal_owner(terminal)
+        with transaction(bridge) as db:
+            if guarded:
+                store.add_nudge(db, terminal)
+            store.record_event(db, stream, terminal, trigger, action, summary, {"message": message})
 
 
 def sweep(bridge, exclude=None):
     rows, known, folders = _snapshot(bridge)
     due, overall = signature(rows), overall_signature(rows)
+    mark_swept(bridge, due)  # Before the consult too, so no second sweep starts while this one runs.
     try:
         reply = brain.consult(bridge.ROOT, "sweep", SWEEP + "\n\n" + overview(bridge, rows), investigate=True,
                               timeout=270, folders=folders)
     finally:
         # A failed sweep still waits its interval, so a broken consult is not retried every few seconds.
-        with transaction(bridge) as db:
-            store.set_setting(db, "sweep_signature", due)
-            store.set_setting(db, "sweep_time", str(time.time()))
+        mark_swept(bridge, due)
     if not isinstance(reply, dict) or not isinstance(reply.get("briefing"), str) or not reply["briefing"].strip():
         return
     streams = {row.get("id"): {t.get("id") for t in row.get("terminals") or []} for row in rows
                if row.get("state") != "Done"}
     with transaction(bridge) as db:
+        paused = store.paused(db)
         store.set_setting(db, "briefing", reply["briefing"])
         store.set_setting(db, "briefing_time", str(time.time()))
         store.set_setting(db, "briefing_signature", overall)
@@ -433,8 +453,15 @@ def sweep(bridge, exclude=None):
             options = ask.get("options")
             options = [str(o) for o in options if str(o).strip()] if isinstance(options, list) else []
             store.open_ask(db, ask["stream"], terminal, text, options, str(ask.get("recommendation") or ""))
-    _act(bridge, reply, known, "sweep", str(reply.get("summary") or ""), exclude)
+    if not paused:
+        _act(bridge, reply, known, "sweep", str(reply.get("summary") or ""), exclude)
     remember(bridge, reply)
+
+
+def mark_swept(bridge, due):
+    with transaction(bridge) as db:
+        store.set_setting(db, "sweep_signature", due)
+        store.set_setting(db, "sweep_time", str(time.time()))
 
 
 def chat(bridge, text):

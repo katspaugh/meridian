@@ -654,6 +654,8 @@ if __name__ == "__main__":
         action = sys.argv[1]
         if action in ("open", "attach", "codex-run", "codex-child", "agent-archive", "view-agent"):
             trace.begin(action, sys.argv[2])
+        elif action in ("manager-sweep", "manager-chat"):
+            trace.begin(action, "-")
         elif action == "create" or (action == "list" and os.getenv("MUXTEROID_TRACE_REFRESH") == "1"):
             trace.begin(action, "-")
         main(*sys.argv[1:])
