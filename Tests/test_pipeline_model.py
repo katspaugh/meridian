@@ -186,5 +186,68 @@ class EventRuleTests(unittest.TestCase):
         self.assertTrue(pipeline.is_finished(run))
 
 
+class ScheduleTests(unittest.TestCase):
+    def one_task_done_in_twenty_minutes(self):
+        run = pipeline.start_task(planned(), 1, T0 + 10 * MIN)
+        pipeline.apply_ledger(run, 'Task 1: complete', T0 + 30 * MIN)
+        return pipeline.start_task(run, 2, T0 + 30 * MIN)
+
+    def test_projects_remaining_tasks_from_the_measured_average(self):
+        plan = pipeline.schedule(self.one_task_done_in_twenty_minutes(), T0 + 35 * MIN)
+        self.assertEqual(plan['task'], 20 * MIN)
+        self.assertEqual([t['end'] for t in plan['tasks']], [T0 + 30 * MIN, T0 + 50 * MIN, T0 + 70 * MIN])
+        self.assertEqual(plan['finish'], T0 + 104 * MIN)
+
+    def test_marks_a_task_slow_past_one_and_a_half_times_the_average(self):
+        plan = pipeline.schedule(self.one_task_done_in_twenty_minutes(), T0 + 65 * MIN)
+        self.assertEqual((plan['tasks'][1]['view'], plan['tasks'][1]['implement']), ('slow', 'slow'))
+
+    def test_no_finish_while_brainstorming(self):
+        run = pipeline.advance_to(pipeline.new_run(T0), 'brainstorm', T0)
+        self.assertIsNone(pipeline.schedule(run, T0 + MIN)['finish'])
+
+    def test_run_without_task_signals_guesses_nothing(self):
+        run = pipeline.skill_event(planned(), 'superpowers:executing-plans', T0 + 10 * MIN)
+        plan = pipeline.schedule(run, T0 + 60 * MIN)
+        self.assertEqual([t['view'] for t in plan['tasks']], ['todo', 'todo', 'todo'])
+        self.assertEqual([t['end'] for t in plan['tasks']], [None, None, None])
+        self.assertEqual(plan['phases']['execute']['view'], 'running')
+        self.assertIsNone(plan['finish'])
+        pipeline.skill_event(run, 'superpowers:finishing-a-development-branch', T0 + 61 * MIN)
+        plan = pipeline.schedule(run, T0 + 62 * MIN)
+        self.assertEqual([t['view'] for t in plan['tasks']], ['done', 'done', 'done'])
+        self.assertEqual([t['end'] for t in plan['tasks']], [None, None, None])
+
+    def test_render_marks_the_waiting_phase_and_hides_skipped_ones(self):
+        view = pipeline.render(planned(), T0 + 6 * MIN, waiting=True)
+        self.assertEqual([p['id'] for p in view['phases']], list(pipeline.PHASES))
+        plan = view['phases'][1]
+        self.assertEqual((plan['label'], plan['mark'], plan['detail']), ('plan', 'needs', '3 tasks'))
+        self.assertTrue(view['needsYou'])
+        self.assertEqual(view['phases'][0], {'id': 'brainstorm', 'label': 'brainstorm', 'mark': 'done',
+            'time': T0 + 5 * MIN, 'estimate': False, 'detail': '', 'url': None, 'tasks': None})
+        self.assertEqual(len(view['phases'][2]['tasks']), 3)
+        busy = pipeline.render(planned(), T0 + 6 * MIN, waiting=True, active_agents=1)
+        self.assertEqual((busy['needsYou'], busy['phases'][1]['mark'], busy['activeAgents']), (False, 'running', 1))
+        skipped = pipeline.render(pipeline.advance_to(pipeline.new_run(T0), 'execute', T0), T0 + MIN)
+        self.assertEqual(skipped['phases'][0]['id'], 'execute')
+
+    def test_render_pull_request_finish_and_frozen(self):
+        run = self.one_task_done_in_twenty_minutes()
+        pipeline.pull_request_created(run, 'https://github.com/o/r/pull/12', T0 + 40 * MIN)
+        view = pipeline.render(run, T0 + 41 * MIN)
+        pr = next(p for p in view['phases'] if p['id'] == 'pr')
+        self.assertEqual((pr['detail'], pr['url'], view['polling']), ('#12', 'https://github.com/o/r/pull/12', True))
+        tasks = next(p for p in view['phases'] if p['id'] == 'execute')
+        self.assertEqual(tasks['detail'], '1 of 3')
+        frozen = pipeline.render(run, T0 + 41 * MIN, waiting=True, frozen=True)
+        ci = next(p for p in frozen['phases'] if p['id'] == 'ci')
+        self.assertEqual((ci['mark'], ci['time'], ci['estimate']), ('todo', None, False))
+        self.assertEqual((frozen['frozen'], frozen['polling'], frozen['needsYou'], frozen['finishAt']), (True, False, False, None))
+        pipeline.complete_phase(run, 'merge', T0 + 50 * MIN)
+        done = pipeline.render(run, T0 + 55 * MIN, waiting=True)
+        self.assertEqual((done['finished'], done['finishAt'], done['polling'], done['needsYou']), ('merged', T0 + 50 * MIN, False, False))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,7 @@
 
 Every function that takes a run mutates it in place and returns it. The event
 rules may instead return a new run, or None when there is no run to report.
+schedule and render only read the run and return new dicts.
 """
 import re
 
@@ -19,6 +20,18 @@ PHASE_LABEL = {
 }
 
 MIN = 60.0
+SLOW_FACTOR = 1.5
+DEFAULT_TASK = 12 * MIN
+IMPLEMENT_SHARE = 0.6
+
+# brainstorm and plan wait on the person, so they carry no estimate.
+PHASE_ESTIMATE = {
+    "final-review": 10 * MIN,
+    "verify": 3 * MIN,
+    "pr": 3 * MIN,
+    "ci": 15 * MIN,
+    "merge": 3 * MIN,
+}
 
 TASK_HEADING = re.compile(r"^#{2,4}\s+Task\s+(\d+)\s*[:.–—-]?\s*(.*)$")
 FENCE = re.compile(r"^\s*(```|~~~)")
@@ -344,3 +357,206 @@ def apply_pr_view(run, view, now):
     advance_to(complete_phase(run, "ci", now), "merge", now)
     run["ciDetail"] = "{} passed".format(total)
     return run
+
+
+def average_task_seconds(run):
+    spans = [
+        task["review"]["endedAt"] - task["implement"]["startedAt"]
+        for task in run["tasks"]
+        if "startedAt" in task["implement"] and "endedAt" in task["review"]
+    ]
+    return sum(spans) / len(spans) if spans else DEFAULT_TASK
+
+
+def _stage_view(stamp, now, budget):
+    status = stamp["status"]
+    if status == "running":
+        started = stamp.get("startedAt")
+        return "slow" if started is not None and now - started > budget * SLOW_FACTOR else "running"
+    if status == "skipped":
+        return "todo"
+    return status
+
+
+def _slot(start, end, estimate, view):
+    return {"start": start, "end": end, "estimate": estimate, "view": view}
+
+
+def _task_slot(n, start, end, estimate, view, implement, review):
+    slot = _slot(start, end, estimate, view)
+    slot.update({"n": n, "implement": implement, "review": review})
+    return slot
+
+
+# A run without a workspace or any task that has started gives no per-task
+# signals, so while it executes nothing is guessed about its tasks.
+def _tracks_tasks(run):
+    return bool(run.get("workspace")) or any(
+        task["implement"]["status"] != "todo" or task["review"]["status"] != "todo" for task in run["tasks"]
+    )
+
+
+def schedule(run, now):
+    task_seconds = average_task_seconds(run)
+    phases = {}
+    tasks = []
+    # None once an open-ended step (brainstorm, an unparsed plan, untracked
+    # tasks) stands between now and the rest: nothing after it gets a time.
+    cursor = now
+
+    for phase in PHASES:
+        stamp = run["phases"][phase]
+        status = stamp["status"]
+
+        if phase == "execute":
+            is_untracked = status == "running" and not _tracks_tasks(run)
+            if (not run["tasks"] and status != "done") or is_untracked:
+                cursor = None
+            previous_end = stamp.get("startedAt")
+            has_running = is_untracked or any(
+                task["implement"]["status"] == "running" or task["review"]["status"] == "running"
+                for task in run["tasks"]
+            )
+            for task in run["tasks"]:
+                implement, review = task["implement"], task["review"]
+                if review["status"] == "done":
+                    previous_end = review.get("endedAt", previous_end)
+                    tasks.append(_task_slot(task["n"], implement.get("startedAt"), review.get("endedAt"),
+                                            False, "done", "done", "done"))
+                    continue
+                if status == "done":
+                    tasks.append(_task_slot(task["n"], None, None, False, "done", "done", "done"))
+                    continue
+                is_active = (implement["status"] == "running" or review["status"] == "running"
+                             or (not has_running and status == "running"))
+                if is_active:
+                    has_running = True
+                    start = implement.get("startedAt")
+                    if start is None:
+                        start = previous_end if previous_end is not None else now
+                    end = max(now + MIN, start + task_seconds)
+                    implement_view = ("running" if implement["status"] == "todo"
+                                      else _stage_view(implement, now, task_seconds * IMPLEMENT_SHARE))
+                    review_view = _stage_view(review, now, task_seconds * (1 - IMPLEMENT_SHARE))
+                    view = "slow" if now - start > task_seconds * SLOW_FACTOR else "running"
+                    tasks.append(_task_slot(task["n"], start, end, True, view, implement_view, review_view))
+                    cursor = None if cursor is None else max(cursor, end)
+                    continue
+                start = cursor
+                end = None if cursor is None else cursor + task_seconds
+                cursor = end
+                tasks.append(_task_slot(task["n"], start, end, True, "todo", "todo", "todo"))
+            if status == "done":
+                phases[phase] = _slot(stamp.get("startedAt"), stamp.get("endedAt"), False, "done")
+            else:
+                phases[phase] = _slot(stamp.get("startedAt"), cursor, True, _stage_view(stamp, now, float("inf")))
+            continue
+
+        estimate = PHASE_ESTIMATE.get(phase)
+        if status in ("done", "failed"):
+            phases[phase] = _slot(stamp.get("startedAt"), stamp.get("endedAt"), False, status)
+        elif status == "skipped":
+            phases[phase] = _slot(None, None, False, "todo")
+        elif status == "running" and estimate is None:
+            if not (phase == "plan" and run["tasks"]):
+                cursor = None
+            phases[phase] = _slot(stamp.get("startedAt"), None, True, "running")
+        elif status == "running":
+            start = stamp.get("startedAt", now)
+            end = max(now + MIN, start + estimate)
+            cursor = None if cursor is None else max(cursor, end)
+            phases[phase] = _slot(start, end, True, _stage_view(stamp, now, estimate))
+        elif estimate is None:
+            phases[phase] = _slot(cursor, None, True, "todo")
+        else:
+            end = None if cursor is None else cursor + estimate
+            phases[phase] = _slot(cursor, end, True, "todo")
+            cursor = end
+
+    last = next((phase for phase in reversed(PHASES) if run["phases"][phase]["status"] != "skipped"), None)
+    finish = phases[last]["end"] if last else None
+    return {"phases": phases, "tasks": tasks, "finish": finish, "task": task_seconds}
+
+
+def _when(slot):
+    if slot["end"] is not None:
+        return slot["end"], slot["estimate"]
+    if slot["view"] != "todo":
+        return slot["start"], False
+    return None, False
+
+
+def _phase_detail(run, phase):
+    tasks = run["tasks"]
+    if phase == "brainstorm":
+        return slug_name(run["specPath"]) if run.get("specPath") else ""
+    if phase == "plan":
+        if tasks:
+            return "{} tasks".format(len(tasks))
+        return slug_name(run["planPath"]) if run.get("planPath") else ""
+    if phase == "execute" and tasks:
+        done = sum(1 for task in tasks if task["review"]["status"] == "done")
+        return "{} of {}".format(done, len(tasks))
+    if phase == "pr" and run.get("pr") is not None:
+        return "#{}".format(run["pr"])
+    if phase == "ci":
+        return run.get("ciDetail") or ""
+    return ""
+
+
+def _freeze(item, marks):
+    for key in marks:
+        if item[key] in ("running", "slow"):
+            item[key] = "todo"
+    if item["estimate"]:
+        item["time"] = None
+        item["estimate"] = False
+
+
+def render(run, now, waiting=False, active_agents=0, frozen=False):
+    plan = schedule(run, now)
+    merge = run["phases"]["merge"]
+    finished = {"done": "merged", "failed": "closed"}.get(merge["status"])
+
+    phases = []
+    for phase in PHASES:
+        if run["phases"][phase]["status"] == "skipped":
+            continue
+        slot = plan["phases"][phase]
+        time, estimate = _when(slot)
+        item = {
+            "id": phase, "label": PHASE_LABEL[phase], "mark": slot["view"], "time": time, "estimate": estimate,
+            "detail": _phase_detail(run, phase), "url": run.get("prUrl") if phase == "pr" else None, "tasks": None,
+        }
+        if phase == "execute":
+            item["tasks"] = []
+            for task, task_slot in zip(run["tasks"], plan["tasks"]):
+                task_time, task_estimate = _when(task_slot)
+                item["tasks"].append({
+                    "n": task["n"], "title": task["title"], "mark": task_slot["view"],
+                    "implement": task_slot["implement"], "review": task_slot["review"],
+                    "round": task.get("round"), "time": task_time, "estimate": task_estimate,
+                })
+        phases.append(item)
+
+    running = [item for item in phases if run["phases"][item["id"]]["status"] == "running"]
+    needs_you = (waiting and not frozen and finished is None and active_agents == 0
+                 and run["phases"]["ci"]["status"] != "running" and bool(running))
+    if needs_you:
+        running[-1]["mark"] = "needs"
+
+    finish_at = merge.get("endedAt") if finished == "merged" else plan["finish"]
+    if frozen:
+        for item in phases:
+            _freeze(item, ("mark",))
+            for task in item["tasks"] or []:
+                _freeze(task, ("mark", "implement", "review"))
+        if finished != "merged":
+            finish_at = None
+        active_agents = 0
+
+    return {
+        "name": run["name"], "startedAt": run["launchedAt"], "finishAt": finish_at, "finished": finished,
+        "needsYou": needs_you, "polling": bool(run.get("prUrl")) and finished is None and not frozen,
+        "frozen": frozen, "activeAgents": active_agents, "phases": phases,
+    }
