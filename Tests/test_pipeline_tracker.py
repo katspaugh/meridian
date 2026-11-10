@@ -1,4 +1,5 @@
 """Run storage and Claude hook events for the Superpowers pipeline."""
+import contextlib
 import io
 import json
 import os
@@ -217,6 +218,19 @@ class TrackerTests(unittest.TestCase):
         self.parent['status'] = 'closed'
         self.assertTrue(streams.streams()[0]['pipeline']['frozen'])
 
+    def test_a_document_written_through_a_symlink_has_one_row_and_one_run(self):
+        plan = self.plan_file()
+        linked = self.root / 'linked worktree'
+        linked.symlink_to(self.folder)
+        self.post('mx-example', 'Write', {'file_path': str(linked / plan.relative_to(self.folder))})
+        with streams.database() as db:
+            # Executing, so a second "new" sighting of the plan would start another run.
+            launched = tracker.update(db, 'mx-example', lambda run: pipeline.advance_to(run, 'execute', 1.0))['launchedAt']
+        row = streams.streams()[0]
+        self.assertEqual(([d['path'] for d in row['documents']], row['pipeline']['startedAt']), ([str(plan)], launched))
+        with streams.database() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM pipeline_docs').fetchone()[0], 1)
+
     def test_a_failing_snapshot_leaves_the_list_working(self):
         with patch.object(tracker, 'guarded', self.real_guarded), patch.object(tracker.trace, 'error') as error, \
                 patch.object(tracker, 'snapshot', side_effect=RuntimeError('boom')):
@@ -250,11 +264,25 @@ class SnapshotTests(unittest.TestCase):
         return subprocess.run(['git', '-C', str(self.repo), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def snap(self, root=None, now=2_000_000_000.0, **options):
+    def snap(self, root=None, now=2_000_000_000.0, reads_only=False, **options):
+        """reads_only also asserts the snapshot ran no Git, updated no run and wrote nothing."""
         settings = dict(created=0.0, own_worktree=True, closed=False, waiting=False, active_agents=0)
         settings.update(options)
-        with streams.database() as db:
-            return tracker.snapshot(db, 'mx-s', str(root or self.repo), now=now, **settings)
+        statements = []
+        with contextlib.ExitStack() as stack:
+            if reads_only:
+                stack.enter_context(patch.object(tracker, 'update', side_effect=AssertionError('run updated')))
+                stack.enter_context(patch.object(tracker.subprocess, 'run', side_effect=AssertionError('git called')))
+            db = stack.enter_context(streams.database())
+            db.set_trace_callback(statements.append)
+            result = tracker.snapshot(db, 'mx-s', str(root or self.repo), now=now, **settings)
+            db.set_trace_callback(None)
+            if reads_only:
+                self.assertFalse(db.in_transaction)
+        if reads_only:
+            self.assertTrue(statements)
+            self.assertEqual([s for s in statements if not s.lstrip().upper().startswith('SELECT')], [])
+        return result
 
     def write(self, relative, text, root=None):
         path = (root or self.repo) / relative
@@ -283,11 +311,44 @@ class SnapshotTests(unittest.TestCase):
         self.write('docs/superpowers/plans/2026-11-10-a.md', '# A Plan\n')
         self.assertEqual([d['title'] for d in self.snap()[1]], ['A Plan'])
 
-    def test_git_failure_adopts_nothing_and_is_retried(self):
+    def test_git_failure_adopts_nothing_and_is_retried_after_a_minute(self):
         self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
         with patch.object(tracker.subprocess, 'run', side_effect=subprocess.TimeoutExpired('git', 4)):
-            self.assertEqual(self.snap(), (None, []))
-        self.assertEqual(len(self.snap()[1]), 1)
+            self.assertEqual(self.snap(now=1000.0), (None, []))
+        self.assertEqual(self.snap(now=1059.0, reads_only=True), (None, []))
+        self.assertEqual(len(self.snap(now=1061.0)[1]), 1)
+
+    def test_non_ascii_names_are_adopted(self):
+        spec = self.write('docs/superpowers/specs/2026-11-10-café-design.md', '# Café\n')
+        self.assertEqual(self.snap()[1], [{'kind': 'spec', 'title': 'Café', 'path': str(spec)}])
+
+    def test_a_run_started_while_the_ledger_is_read_is_left_alone(self):
+        self.write('docs/superpowers/plans/2026-11-10-a.md', '# A Plan\n### Task 1: One\n')
+        self.snap(now=100.0)
+        self.write('.superpowers/sdd/2026-11-10-a/plan-path', 'docs/superpowers/plans/2026-11-10-a.md\n')
+        self.write('.superpowers/sdd/2026-11-10-a/progress.md', '# SDD ledger\nTask 1: complete\n')
+        real_read = tracker._read
+        def read_while_a_hook_starts_a_run(path):
+            with streams.database() as other:
+                tracker.update(other, 'mx-s', lambda run: pipeline.advance_to(pipeline.new_run(150.0), 'brainstorm', 150.0))
+            return real_read(path)
+        with patch.object(tracker, '_read', side_effect=read_while_a_hook_starts_a_run):
+            self.snap(now=200.0)
+        with streams.database() as db:
+            run = tracker.load(db, 'mx-s')
+        self.assertEqual((run['launchedAt'], run['phases']['execute']['status'], run['tasks']), (150.0, 'todo', []))
+        self.assertNotIn('ledgerMtime', run)
+
+    def test_malformed_run_paths_still_list_the_pipeline_and_documents(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        self.snap()
+        def spoil(run):
+            run.update(workspace=7, planPath=['not', 'a', 'path'])
+            return run
+        with streams.database() as db:
+            tracker.update(db, 'mx-s', spoil)
+        view, documents = self.snap()
+        self.assertEqual((view['name'], [d['title'] for d in documents]), ('a', ['A']))
 
     def test_plan_then_ledger_then_a_second_run(self):
         self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
@@ -343,21 +404,13 @@ class SnapshotTests(unittest.TestCase):
         self.write('.superpowers/sdd/2026-11-10-a/progress.md', '# SDD ledger\nTask 1: complete\n')
         first = self.snap()
         self.assertEqual(len(next(p for p in first[0]['phases'] if p['id'] == 'execute')['tasks']), 2)
-        statements = []
-        with patch.object(tracker, 'update', side_effect=AssertionError('run updated')), \
-                patch.object(tracker.subprocess, 'run', side_effect=AssertionError('git called')), \
-                streams.database() as db:
-            db.set_trace_callback(statements.append)
-            second = tracker.snapshot(db, 'mx-s', str(self.repo), created=0.0, own_worktree=True, closed=False,
-                                      waiting=False, active_agents=0, now=2_000_000_000.0)
-            self.assertFalse(db.in_transaction)
-            db.set_trace_callback(None)
-        self.assertEqual(second, first)
-        self.assertTrue(statements)
-        self.assertEqual([s for s in statements if not s.lstrip().upper().startswith('SELECT')], [])
+        self.assertEqual(self.snap(reads_only=True), first)
 
     def test_timestamp(self):
         self.assertEqual(tracker.timestamp('2026-11-10T05:41:25Z'), 1794289285.0)
+        self.assertEqual(tracker.timestamp('2026-11-10T06:41:25+01:00'), 1794289285.0)
+        self.assertEqual(tracker.timestamp('2026-11-10T05:41:25.5Z'), 1794289285.5)
+        self.assertEqual(tracker.timestamp('not a time'), 0.0)
         self.assertEqual(tracker.timestamp(''), 0.0)
 
 

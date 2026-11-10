@@ -20,6 +20,8 @@ DOCUMENTS = (
 )
 DOCUMENT_FOLDERS = (("spec", "docs/superpowers/specs"), ("plan", "docs/superpowers/plans"))
 WORKSPACE_SUFFIX = re.compile(r"/\.superpowers/sdd/[^/]+$")
+PATH_FIELDS = ("specPath", "planPath", "workspace")
+GIT_RETRY_SECONDS = 60
 ISO_TIME = re.compile(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$")
 
 
@@ -53,7 +55,13 @@ def load(db, stream):
         run = json.loads(row[0])
     except (TypeError, ValueError):
         return None
-    return run if _is_run(run) else None
+    if not _is_run(run):
+        return None
+    # A path field that is not text counts as absent, so it cannot break every refresh.
+    for field in PATH_FIELDS:
+        if field in run and not isinstance(run[field], str):
+            del run[field]
+    return run
 
 
 def update(db, stream, change):
@@ -83,6 +91,8 @@ def _read(path):
 
 def record_document(db, stream, kind, path, now, created=True):
     """created false lists the document but never lets it start a run."""
+    # One file has one row, whichever spelling (a symlinked folder) reached it.
+    path = os.path.realpath(path)
     try:
         text = Path(path).read_text(encoding="utf-8")
         mtime = os.stat(path).st_mtime
@@ -148,9 +158,8 @@ def _workspace_plan(workspace):
     marker = marker.strip() if marker else ""
     if not marker:
         return None
-    if os.path.isabs(marker):
-        return marker
-    return os.path.join(WORKSPACE_SUFFIX.sub("", workspace), marker)
+    # Real, like a recorded document's path, so the run's plan compares equal to it.
+    return os.path.realpath(os.path.join(WORKSPACE_SUFFIX.sub("", workspace), marker))
 
 
 def command_event(db, key, command, output, now):
@@ -186,7 +195,7 @@ def timestamp(text):
 
 
 def _listing(root):
-    """{path: (kind, stat)} for the regular Markdown files in the two document folders."""
+    """{real path: (kind, stat)} for the regular Markdown files in the two document folders of a real root."""
     found = {}
     for kind, folder in DOCUMENT_FOLDERS:
         try:
@@ -194,7 +203,8 @@ def _listing(root):
                 for entry in entries:
                     try:
                         if entry.name.endswith(".md") and entry.is_file():
-                            found[entry.path] = kind, entry.stat()
+                            path = os.path.realpath(entry.path) if entry.is_symlink() else entry.path
+                            found[path] = kind, entry.stat()
                     except OSError:
                         continue
         except OSError:
@@ -216,15 +226,31 @@ def _untracked(root, candidates, own_worktree):
         if not own_worktree and "not a git repository" in result.stderr:
             return set(candidates)
         return None
-    named = {os.path.join(root, line) for line in result.stdout.split("\0") if line}
+    named = {os.path.realpath(os.path.join(root, line)) for line in result.stdout.split("\0") if line}
     return {path for path in candidates if path in named}
 
 
+def _git_failed_at(stored):
+    """When the stored scan record is a Git failure, its time; otherwise None."""
+    try:
+        record = json.loads(stored)
+    except (TypeError, ValueError):
+        return None
+    failed_at = record.get("gitFailedAt") if isinstance(record, dict) else None
+    return failed_at if isinstance(failed_at, (int, float)) else None
+
+
 def _scan(db, stream, root, created, own_worktree, now):
+    row = db.execute("SELECT signature FROM pipeline_scans WHERE stream=?", (stream,)).fetchone()
+    stored = row[0] if row else "[]"
+    failed_at = _git_failed_at(stored)
+    # Git failed lately: wait a minute before asking again, so a broken checkout costs no subprocess per refresh.
+    if failed_at is not None and failed_at <= now < failed_at + GIT_RETRY_SECONDS:
+        return
+    root = os.path.realpath(root)
     listing = _listing(root)
     signature = json.dumps(sorted([path, stat.st_mtime_ns] for path, (_, stat) in listing.items()))
-    stored = db.execute("SELECT signature FROM pipeline_scans WHERE stream=?", (stream,)).fetchone()
-    if signature == (stored[0] if stored else "[]"):
+    if signature == stored:
         return
     known = dict(db.execute("SELECT path,mtime FROM pipeline_docs WHERE stream=?", (stream,)))
     candidates = [path for path in listing if path not in known]
@@ -234,16 +260,17 @@ def _scan(db, stream, root, created, own_worktree, now):
     changed = {path for path in listing if path in known and listing[path][1].st_mtime != known[path]}
     for path in sorted((adopted or set()) | changed, key=lambda path: listing[path][1].st_mtime):
         record_document(db, stream, listing[path][0], path, now)
-    # When Git could not answer, the next refresh asks again.
-    if adopted is not None:
-        db.execute("INSERT OR REPLACE INTO pipeline_scans VALUES (?,?)", (stream, signature))
-        db.commit()
+    # A Git failure is recorded instead of the signature, so the scan is retried after a minute.
+    record = signature if adopted is not None else json.dumps({"gitFailedAt": now})
+    db.execute("INSERT OR REPLACE INTO pipeline_scans VALUES (?,?)", (stream, record))
+    db.commit()
 
 
 def _poll_ledger(db, stream, root, now):
-    run = load(db, stream)
+    run = load(db, stream)          # path fields that are not text were dropped
     if run is None or pipeline.is_finished(run):
         return
+    identity = run.get("launchedAt"), run.get("planPath")
     workspace = run.get("workspace")
     if not workspace:
         if not run.get("planPath"):
@@ -263,7 +290,8 @@ def _poll_ledger(db, stream, root, now):
         return
 
     def change(run):
-        if run is None or pipeline.is_finished(run):
+        # A hook may have started another run since the load: this ledger is not its own.
+        if run is None or pipeline.is_finished(run) or (run.get("launchedAt"), run.get("planPath")) != identity:
             return run
         pipeline.advance_to(run, "execute", now)
         pipeline.apply_ledger(run, text, now)
