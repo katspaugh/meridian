@@ -24,6 +24,7 @@ import workstream_links as links
 import subagents
 import agent_navigation
 import codex_session
+import pipeline_tracker as tracker
 
 ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -60,6 +61,7 @@ def database():
     db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
     subagents.initialize(db)
+    tracker.initialize(db)
     trace.record("activity database ready")
     return db
 
@@ -284,6 +286,11 @@ def hook(key, sid):
         with database() as db:
             links.tool_result(db, key, event.get("tool_name", ""), event.get("tool_input", {}),
                               event.get("tool_response", ""), event.get("cwd"), live=True)
+        if not event.get("agent_id"):
+            # A separate connection: the links above are already committed.
+            with database() as db:
+                tracker.guarded(db, None, tracker.tool_event, db, key, event.get("tool_name", ""),
+                                event.get("tool_input") or {}, event.get("tool_response"), time.time())
     if event.get("agent_id"):
         with database() as db:
             subagents.record(db, key, sid, event)
@@ -569,6 +576,11 @@ def main(action, *args):
             raise ValueError("Use a GitHub PR or Linear issue URL.")
         with database() as db:
             links.collect(db, key, url)
+        return
+    if action == "pipeline-reset":
+        stream, = args
+        with database() as db:
+            tracker.reset(db, stream)
         return
     if action == "attach":
         key, = args
