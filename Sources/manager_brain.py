@@ -39,6 +39,14 @@ ASKS = {"type": "array", "items": _object(
     ["stream", "terminal", "summary", "options", "recommendation"])}
 
 
+MESSAGES = {"type": "array", "items": _object({
+    "stream": STRING, "terminal": STRING, "kind": {"type": "string", "enum": ["status", "next", "reminder", "rule"]},
+    "text": STRING, "newSubject": {"type": "boolean"}, "rule": STRING, "ruleEvidence": STRINGS,
+    "buttons": {"type": "array", "items": _object({"label": STRING, "action": STRING,
+        "terminal": STRING, "value": STRING}, ["label", "action", "terminal", "value"])}},
+    ["stream", "terminal", "kind", "text", "newSubject", "rule", "buttons"])}
+
+
 def _manager(root):
     return Path(root) / "manager"
 
@@ -73,13 +81,15 @@ def remember(root, items):
 
 def schema(trigger):
     if trigger == "sweep":
-        return _object({"summary": STRING, "briefing": STRING, "actions": ACTIONS, "asks": ASKS},
+        return _object({"summary": STRING, "briefing": STRING, "actions": ACTIONS, "asks": ASKS, "messages": MESSAGES},
                        ["summary", "briefing", "actions"])
     if trigger == "chat":
         # Notes go into the system prompt, so only the boss's own chat may add to them.
         return _object({"reply": STRING, "actions": ACTIONS, "remember": STRINGS}, ["reply", "actions"])
     properties = {"verdict": {"type": "string", "enum": VERDICTS[trigger]}, "summary": STRING,
                   "message": STRING, "ask": ASK, "decisions": DECISIONS}
+    if trigger == "stop":
+        properties["messages"] = MESSAGES
     if trigger == "question":
         properties["answers"] = {"type": "object", "additionalProperties": STRING}
     return _object(properties, ["verdict", "summary", "message"])

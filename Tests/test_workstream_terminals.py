@@ -505,6 +505,52 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         streams.terminal_exited(key)
         self.assertNotIn(key, [t['id'] for t in streams.streams()[0]['terminals']])
 
+    def test_now_line_tracks_tools_and_clears_at_turn_end(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.live.add(key)
+        self.run_hook(key, "sid", hook_event_name="PreToolUse", tool_name="Bash",
+                      tool_input={"description": "Running tests", "command": "make test"})
+        terminal = next(t for t in streams.streams()[0]['terminals'] if t['id'] == key)
+        self.assertEqual(terminal['nowText'], 'Running tests')
+        self.assertIsInstance(terminal['nowStarted'], float)
+        self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done")
+        terminal = next(t for t in streams.streams()[0]['terminals'] if t['id'] == key)
+        self.assertEqual(terminal['nowText'], '')
+        self.assertIsNone(terminal['nowStarted'])
+
+    def test_saved_rules_reach_session_and_prompt_context(self):
+        key = self.register(provider="claude", sid="sid")
+        streams.streams()
+        project = streams.manager_store.project_key(self.parent['metadata'])
+        streams.manager_store.save_rule(self.root, project, 'Run tests before finishing.')
+        for event in ('SessionStart', 'UserPromptSubmit'):
+            self.assertIn('Run tests before finishing.', streams.agent_context(key, event))
+
+    def test_return_after_thirty_minutes_requests_one_sweep(self):
+        import time
+        with streams.database() as db:
+            streams.manager_store.set_setting(db, 'sweep_time', '1234')
+            streams.manager_store.set_setting(db, 'inactive_since', str(time.time() - 1801))
+        streams.main('manager-active', '1')
+        with streams.database() as db:
+            self.assertEqual(streams.manager_store.setting(db, 'sweep_time'), '0')
+            self.assertEqual(streams.manager_store.setting(db, 'inactive_since'), '')
+            streams.manager_store.set_setting(db, 'sweep_time', '5678')
+        streams.main('manager-active', '1')
+        with streams.database() as db:
+            self.assertEqual(streams.manager_store.setting(db, 'sweep_time'), '5678')
+
+    def test_post_tool_reminder_reaches_hook_output_while_paused(self):
+        import time
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.live.add(key)
+        with streams.database() as db:
+            streams.manager_store.note_user_prompt(db, key, 'Work', now=time.time() - 301)
+        with patch.object(streams.manager, 'review', side_effect=REVIEW):
+            out = json.loads(self.run_hook(key, 'sid', hook_event_name='PostToolUse', tool_name='Read', tool_input={}))
+        self.assertIn('planned steps', out['hookSpecificOutput']['additionalContext'])
+        self.assertEqual(out['hookSpecificOutput']['hookEventName'], 'PostToolUse')
+
 
 class WorktreeCreationTests(unittest.TestCase):
     def setUp(self):

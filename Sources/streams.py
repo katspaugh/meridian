@@ -272,7 +272,7 @@ Run your Beads commands with this prefix: {cli}
 Inspect the parent with bd show {key}, then bd children {key} --json before planning or resuming.
 Maintain the parent title as a short semantic summary of the current goal. As soon as the goal is clear, use bd update {key} --title "Concise task name". Use the conversation, relevant findings, and linked issue details to describe the concrete outcome in roughly 3–8 words (for example, "Recover interrupted photo uploads"). Avoid generic placeholders, paths, ticket IDs, and copied prompt fragments.
 Reconsider the title when a clarification or investigation reveals a more accurate goal. Update it in that same turn, including when the change becomes clear midway through the work. Keep an accurate title through routine progress. Honor any title the user explicitly asks to keep.
-For implementation work, reuse matching children or create actionable steps with bd create --parent {key} -t task --title "step".
+For implementation work, write your planned steps as Beads tasks before your first edit and keep them current. Reuse matching children or create actionable steps with bd create --parent {key} -t task --title "step".
 Keep all internal tasks directly under {key}. Use bd ready --parent {key} to choose unblocked work.
 Other terminals may share this workstream, folder, worktree, and task list. Check current task ownership before editing; do not overwrite another terminal's changes. Keep the parent title about the shared goal, not just your current assignment.
 Set a child in_progress when starting (bd update CHILD -s in_progress).
@@ -288,6 +288,11 @@ In these examples, replace bd with the command prefix above."""
         children = json.loads(bd("list", "--parent", key, "--all", "--limit", "0", "--json")) or []
         current = [f"{c['id']} [{c['status']}] {c['title'][:140]}" for c in children if c["status"] != "closed"]
         guide += "\nOpen child tasks at session start:\n" + ("\n".join(current[:40]) or "(none)")
+    with database() as db:
+        project = manager_store.setting(db, 'project:' + key, '')
+    rules = manager_store.project_rules(ROOT, project)
+    if rules:
+        guide += '\nProject standing rules saved by the owner:\n' + rules
     return guide
 
 
@@ -303,6 +308,14 @@ def hook(key, sid):
     # through subprocess.run also kills the consult.
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(number, interrupted)
+    with database() as db:
+        valid = db.execute('SELECT 1 FROM activity WHERE id=? AND session=?', (key, sid)).fetchone()
+        if valid:
+            if event.get('hook_event_name') == 'PreToolUse':
+                db.execute('INSERT OR REPLACE INTO manager_tools VALUES (?,?,?,?)',
+                           (key, sid, manager_store.tool_phrase(event), time.time()))
+            elif event.get('hook_event_name') in ('Stop', 'StopFailure', 'SessionStart', 'UserPromptSubmit') and not event.get('agent_id'):
+                db.execute('DELETE FROM manager_tools WHERE terminal=?', (key,))
     # First, with no connection open here: a review may consult the manager for minutes.
     try:
         outcome = manager.review(sys.modules[__name__], key, sid, event)
@@ -429,6 +442,10 @@ def streams():
         owners = {key: parent for key, parent, _, _ in registry}
         providers = {key: provider for key, _, provider, _ in registry}
         folders = {key: parents[parent]['metadata']['folder'] for key, parent, _, _ in registry if parent in parents}
+        tools = {tid: (session, phrase, started) for tid, session, phrase, started in db.execute('SELECT * FROM manager_tools')}
+        for issue in parents.values():
+            meta = issue.get('metadata') or {}
+            manager_store.set_setting(db, 'project:' + issue['id'], manager_store.project_key(meta))
         sessions = {}
         for key, sid, state, detail, transcript in db.execute("SELECT id,session,state,detail,transcript FROM activity"):
             sessions[key] = sid
@@ -471,7 +488,9 @@ def streams():
             sid = sessions.get(tid)
             entries.append(dict(id=tid, title=title, provider=provider, state=state, detail=detail,
                                 live=tid in live, terminalSocket=str(TERMINALS / tid) if tid in attached else None,
-                                session=sid, nativeView=bool(sid and (ROOT/"views"/sid).is_dir()),
+                                session=sid, nowText=tools.get(tid, (None, '', None))[1] if state == 'Working' and tools.get(tid, (None,))[0] == sid else '',
+                                nowStarted=tools.get(tid, (None, '', None))[2] if state == 'Working' and tools.get(tid, (None,))[0] == sid else None,
+                                nativeView=bool(sid and (ROOT/"views"/sid).is_dir()),
                                 agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])
                                         if a['state'] in ('Working', 'Needs you')]))
         # An idle shell does not mask finished agent work. A working agent does.
@@ -488,7 +507,7 @@ def streams():
         if issue["status"] == "closed":
             state = "Done"
         rows.append(dict(id=key, terminalSocket=str(TERMINALS / key) if key in attached else None, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
-                         sourceFolder=issue["metadata"].get("sourceFolder"), worktreeBranch=issue["metadata"].get("worktreeBranch"),
+                         repository=issue["metadata"].get("repository"), sourceFolder=issue["metadata"].get("sourceFolder"), worktreeBranch=issue["metadata"].get("worktreeBranch"),
                          reference=issue.get("external_ref") or "", state=state, detail=detail, live=any(t['live'] for t in entries), tasks=children.get(key, []), links=artifacts.get(key, []),
                          agents=stream_agents, terminals=entries, pipeline=pipeline_view, documents=documents,
                          session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
@@ -582,6 +601,35 @@ def main(action, *args):
     if action == "hook":
         return hook(*args)
     # The manager's actions take bridge.lock only around their snapshot: a sweep or chat consults for minutes.
+    if action == 'manager-message':
+        message_id, revision, verb, *index = args
+        print(json.dumps({'ok': manager.message_action(sys.modules[__name__], int(message_id), int(revision), verb,
+                                                       int(index[0]) if index else None)}))
+        return
+    if action == 'manager-ask-action':
+        ask_id, verb = args
+        if verb not in ('open', 'details'):
+            raise ValueError('Unknown question action.')
+        with database() as db:
+            ask = db.execute("SELECT stream,terminal,summary FROM manager_asks WHERE id=? AND status='open'", (int(ask_id),)).fetchone()
+            if ask:
+                db.execute('INSERT OR IGNORE INTO manager_ask_reads VALUES (?)', (int(ask_id),))
+                manager_store.record_event(db, ask[0], ask[1], 'button', verb, ask[2])
+        return
+    if action == 'manager-ask-seen':
+        with database() as db:
+            db.execute('INSERT OR IGNORE INTO manager_ask_reads SELECT id FROM manager_asks WHERE id=?', (int(args[0]),))
+        return
+    if action == 'manager-active':
+        with database() as db:
+            if args[0] == '0':
+                manager_store.set_setting(db, 'inactive_since', str(time.time()))
+            else:
+                since = manager._number(manager_store.setting(db, 'inactive_since'))
+                if since and time.time() - since >= 1800:
+                    manager_store.set_setting(db, 'sweep_time', '0')
+                manager_store.set_setting(db, 'inactive_since', '')
+        return
     if action == "manager-state":
         print(json.dumps(manager.state(sys.modules[__name__])))
         return
@@ -602,6 +650,9 @@ def main(action, *args):
                 manager_store.set_setting(db, "paused", value)
             elif action == "manager-dismiss":
                 ask, = args
+                row = db.execute("SELECT stream,terminal,summary FROM manager_asks WHERE id=? AND status='open'", (int(ask),)).fetchone()
+                if row:
+                    manager_store.record_event(db, row[0], row[1], 'button', 'dismiss', row[2])
                 manager_store.resolve_asks(db, ask_id=int(ask))
             else:
                 manager_store.mark_seen(db)
@@ -647,7 +698,12 @@ def main(action, *args):
         return
     if action == "pulls":
         # Network lookups stay outside bridge.lock so they never delay the list refresh.
-        print(json.dumps(links.pull_details(args)))
+        found = links.pull_details(args)
+        try:
+            manager.pull_messages(sys.modules[__name__], found)
+        except Exception as exc:
+            trace.record(f'PR manager message failed type={type(exc).__name__}')
+        print(json.dumps(found))
         return
     if action == "link":
         key, url = args

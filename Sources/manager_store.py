@@ -22,6 +22,15 @@ def initialize(db):
                user_prompt_time REAL, tell_text TEXT, tell_time REAL)""")
     db.execute("CREATE TABLE IF NOT EXISTS manager_chat (id INTEGER PRIMARY KEY AUTOINCREMENT, time REAL, role TEXT, text TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS manager_settings (key TEXT PRIMARY KEY, value TEXT)")
+    db.execute("""CREATE TABLE IF NOT EXISTS manager_messages (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stream TEXT, kind TEXT, time REAL, revision INTEGER DEFAULT 1, hidden INTEGER DEFAULT 0,
+        seen INTEGER DEFAULT 0, body TEXT, UNIQUE(stream,kind))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS manager_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project TEXT, terminal TEXT, time REAL, text TEXT)""")
+    db.execute("CREATE TABLE IF NOT EXISTS manager_ask_reads (id INTEGER PRIMARY KEY)")
+    db.execute("""CREATE TABLE IF NOT EXISTS manager_tools
+        (terminal TEXT PRIMARY KEY, session TEXT, phrase TEXT, started REAL)""")
+
 
 
 def clock(now):
@@ -187,4 +196,86 @@ def state(db, limit=200):
         briefing_time = None
     unseen, = db.execute("SELECT count(*) FROM manager_events WHERE seen=0").fetchone()
     return dict(paused=paused(db), briefing=setting(db, "briefing") or "", briefingTime=briefing_time,
-                asks=asks, events=events, chat=chat, unseen=unseen)
+                asks=asks, events=events, chat=chat, unseen=unseen, messages=messages(db),
+                unread=sum(1 for m in messages(db) if not m['seen'] and m['kind'] != 'status') +
+                db.execute("SELECT count(*) FROM manager_asks WHERE status='open' AND id NOT IN "
+                           "(SELECT id FROM manager_ask_reads)").fetchone()[0])
+
+
+def put_message(db, item, now=None):
+    """Later survives rewording. Only an explicit new subject can reopen it."""
+    old = db.execute("SELECT id,revision,hidden,body FROM manager_messages WHERE stream=? AND kind=?",
+                     (item['stream'], item['kind'])).fetchone()
+    body = json.dumps(item, sort_keys=True)
+    if old and old[3] == body and (not old[2] or not item.get('newSubject', False)):
+        return old[0]
+    if old and old[2] and not item.get('newSubject', False):
+        return old[0]
+    if old:
+        db.execute("UPDATE manager_messages SET time=?,revision=revision+1,hidden=0,seen=0,body=? WHERE id=?",
+                   (clock(now), body, old[0]))
+        return old[0]
+    return db.execute("INSERT INTO manager_messages (stream,kind,time,body) VALUES (?,?,?,?)",
+                      (item['stream'], item['kind'], clock(now), body)).lastrowid
+
+
+def messages(db, hidden=False):
+    return [dict(loads(body, {}), id=i, revision=r, time=t, seen=bool(seen))
+            for i, r, t, seen, body in db.execute(
+                'SELECT id,revision,time,seen,body FROM manager_messages WHERE hidden=? ORDER BY time DESC,id DESC',
+                (int(hidden),))]
+
+
+def record_prompt(db, project, terminal, prompt, now=None):
+    if not project or not isinstance(prompt, str) or not prompt.strip():
+        return
+    db.execute('INSERT INTO manager_prompts (project,terminal,time,text) VALUES (?,?,?,?)',
+               (project, terminal, clock(now), prompt[:500]))
+    db.execute('DELETE FROM manager_prompts WHERE project=? AND id NOT IN '
+               '(SELECT id FROM manager_prompts WHERE project=? ORDER BY id DESC LIMIT 30)', (project, project))
+
+
+def project_key(row):
+    from pathlib import Path
+    path = row.get('repository') or row.get('sourceFolder') or row.get('folder')
+    return str(Path(path).resolve()) if path else ''
+
+
+def rules_path(root, project):
+    from pathlib import Path
+    import re
+    name = re.sub(r'[^a-zA-Z0-9_.-]', '-', Path(project).name) or 'project'
+    return Path(root) / 'manager' / 'projects' / (name + '-' + hashlib.sha256(project.encode()).hexdigest()[:12] + '.md')
+
+
+def project_rules(root, project):
+    if not project:
+        return ''
+    try:
+        return rules_path(root, project).read_text(encoding='utf-8')[:8000]
+    except OSError:
+        return ''
+
+
+def save_rule(root, project, rule):
+    path = rules_path(root, project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as file:
+        file.write('\n## Standing rule\n\n' + rule.strip() + '\n')
+
+
+def tool_phrase(event):
+    from pathlib import Path
+    tool, data = event.get('tool_name', ''), event.get('tool_input') or {}
+    if not isinstance(data, dict):
+        data = {}
+    name = Path(str(data.get('file_path') or data.get('path') or '')).name
+    phrase = {'Read': 'Reading ' + (name or 'files'), 'Edit': 'Editing ' + (name or 'files'),
+              'Write': 'Writing ' + (name or 'files'), 'Grep': 'Searching code', 'Glob': 'Finding files',
+              'WebSearch': 'Searching the web', 'WebFetch': 'Reading a web page',
+              'Agent': 'Delegating: ' + str(data.get('description') or 'a task')}.get(tool, 'Using ' + tool)
+    if tool == 'Bash':
+        phrase = str(data.get('description') or 'Running a command')
+    if event.get('agent_id'):
+        phrase = 'subagent: ' + phrase
+    return ' '.join(phrase.split())[:100]

@@ -228,9 +228,9 @@ class RestartTests(Fixture):
 
 
 class SignatureTests(Fixture):
-    def test_sweep_is_due_only_for_what_hooks_cannot_see(self):
+    def test_sweep_runs_for_hook_blind_changes_and_hourly(self):
         self.rows = [self.stream(terminals=[self.terminal("t1", "claude", "Review")])]
-        self.assertIs(manager.state(self.bridge)["sweepDue"], False)
+        self.assertIs(manager.state(self.bridge)["sweepDue"], True)
         self.rows = [self.stream(terminals=[self.terminal("c1", "codex", "Review")])]
         self.assertTrue(manager.state(self.bridge)["sweepDue"])
         self.consult.return_value = {"summary": "Nudged Codex.", "briefing": "All moving.", "actions": []}
@@ -241,7 +241,7 @@ class SignatureTests(Fixture):
         self.assertIs(state["briefingStale"], False)
         with self.db() as db:
             store.set_setting(db, "sweep_time", str(time.time() - 3600))
-        self.assertIs(manager.state(self.bridge)["sweepDue"], False)
+        self.assertIs(manager.state(self.bridge)["sweepDue"], True)
         self.rows[0]["state"] = "Review"
         self.assertIs(manager.state(self.bridge)["briefingStale"], True)
 
@@ -726,7 +726,7 @@ class BridgeActionTests(unittest.TestCase):
 
     def test_state_has_every_key_the_app_decodes(self):
         self.assertEqual(set(self.state()), {"paused", "briefing", "briefingTime", "briefingStale", "sweepDue",
-                                             "asks", "events", "chat", "unseen"})
+                                             "asks", "events", "chat", "unseen", "messages", "unread"})
 
     def test_dismiss_resolves_one_ask_and_seen_marks_events(self):
         with streams.database() as db:

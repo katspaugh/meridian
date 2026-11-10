@@ -9,6 +9,8 @@ struct Subagent: Decodable, Identifiable {
 
 struct WorkstreamTerminal: Decodable, Identifiable {
     let id, title, provider, state, detail: String
+    var nowText: String? = nil
+    var nowStarted: Double? = nil
     let session, terminalSocket: String?
     let live, nativeView: Bool
     let agents: [Subagent]
@@ -515,7 +517,7 @@ struct Dashboard: View {
                     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }
             .buttonStyle(.plain).disabled(switching)
-            .badge(manager.state?.asks.count ?? 0)
+            .badge(manager.state?.unread ?? 0)
             .listRowBackground(pane == .manager ? Color.accentColor.opacity(0.16) : Color.clear)
             .keyboardShortcut("m", modifiers: [.command, .shift])
             Button { pane = .board } label: {
@@ -551,6 +553,10 @@ struct Dashboard: View {
                     if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
                     if pane == .manager {
                         ManagerView(store: manager, streams: store.rows, openStream: openFromOverview,
+                                    openTerminal: { stream, id in
+                                        if !id.isEmpty { rememberTerminal(id, in: stream) }
+                                        openFromOverview(stream)
+                                    },
                                     focusedTerminal: selectedTerminalID)
                     } else if pane == .board {
                         SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true })
@@ -695,7 +701,10 @@ struct Dashboard: View {
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
+        WorkstreamInspector(stream: stream, manager: manager, openManager: { pane = .manager }, openTerminal: { id in
+            if !id.isEmpty { rememberTerminal(id, in: stream) }
+            openFromOverview(stream)
+        }, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
                             terminal: selectedTerminal(stream), busy: store.busy,
                             clearPipeline: { Task { _ = await store.perform(["pipeline-reset", stream.id]) } },
                             pulls: store.pulls, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in

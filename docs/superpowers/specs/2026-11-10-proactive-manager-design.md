@@ -1,6 +1,6 @@
 # Proactive manager: design
 
-Date: 2026-11-10. Status: draft for the owner's review. Builder check done.
+Date: 2026-11-10. Status: approved by the owner. Builder check done.
 
 This builds on the workstream manager (`2026-11-10-workstream-manager-design.md`), which is built and shipped. Read that first. Everything it says still holds unless this document changes it.
 

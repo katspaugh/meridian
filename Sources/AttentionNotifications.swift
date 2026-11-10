@@ -29,8 +29,14 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         .terminateNow
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) { reportFocus() }
-    func applicationDidResignActive(_ notification: Notification) { reportFocus() }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        reportFocus()
+        Task { _ = try? await Bridge.run(["manager-active", "1"]) }
+    }
+    func applicationDidResignActive(_ notification: Notification) {
+        reportFocus()
+        Task { _ = try? await Bridge.run(["manager-active", "0"]) }
+    }
 
     /// A sweep consults for minutes, so the bridge re-reads this just before it types.
     private func reportFocus() {

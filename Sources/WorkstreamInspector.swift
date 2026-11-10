@@ -3,6 +3,9 @@ import MarkdownUI
 
 struct WorkstreamInspector: View {
     let stream: Stream
+    @ObservedObject var manager: ManagerStore
+    let openManager: () -> Void
+    let openTerminal: (String) -> Void
     let asks: [ManagerAsk]
     let terminal: WorkstreamTerminal?
     let busy: Bool
@@ -32,7 +35,6 @@ struct WorkstreamInspector: View {
                 // With a Pipeline section the whole content scrolls, the Tasks header included.
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        if !asks.isEmpty { managerAsks }
                         PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline,
                                         open: { openWindow(id: "document", value: URL(fileURLWithPath: $0.path)) })
                         Divider()
@@ -49,7 +51,6 @@ struct WorkstreamInspector: View {
                 tasksHeader.padding(16)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        if !asks.isEmpty { managerAsks }
                         taskList
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -58,10 +59,14 @@ struct WorkstreamInspector: View {
             }
 
             Divider()
+            ManagerSlot(stream: stream, asks: asks, store: manager, openManager: openManager, openTerminal: openTerminal)
+            Divider()
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {
                     Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
-                    Text(stream.displayState).font(.callout.weight(.semibold))
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(nowLine(context.date)).font(.callout.weight(.semibold)).lineLimit(2)
+                    }
                 }
                 Label(URL(fileURLWithPath: stream.sourceFolder ?? stream.folder).lastPathComponent, systemImage: "folder")
                     .font(.callout).foregroundStyle(.secondary).help(stream.folder)
@@ -148,21 +153,11 @@ struct WorkstreamInspector: View {
         }
     }
 
-    private var managerAsks: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "person.crop.circle.badge.checkmark").foregroundStyle(.orange)
-                Text("The manager needs your call").fontWeight(.semibold)
-            }
-            ForEach(asks) { ask in
-                if ask.id != asks.first?.id { Divider() }
-                ManagerAskDetails(ask: ask)
-            }
-        }
-        .font(.callout)
-        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
-        .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.22)))
+    private func nowLine(_ date: Date) -> String {
+        guard let terminal, terminal.state == "Working", let text = terminal.nowText, !text.isEmpty,
+              let started = terminal.nowStarted else { return stream.displayState }
+        let seconds = max(0, Int(date.timeIntervalSince1970 - started))
+        return "\(stream.displayState) · \(text) · " + (seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m")
     }
 
     private func taskGroup(_ status: String) -> some View {

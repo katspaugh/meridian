@@ -103,7 +103,16 @@ def review(bridge, key, sid, event):
     name = event.get("hook_event_name")
     if name == "UserPromptSubmit":
         with transaction(bridge) as db:
-            store.note_user_prompt(db, key, event.get("prompt", ""))
+            owner_prompt = store.note_user_prompt(db, key, event.get("prompt", ""))
+        if owner_prompt:
+            with bridge.bridge_lock():
+                rows = bridge.streams()
+            row = next((r for r in rows if r.get('id') == bridge.terminal_owner(key)), {})
+            with transaction(bridge) as db:
+                store.record_prompt(db, store.project_key(row), key, event.get('prompt', ''))
+                if row:
+                    store.set_setting(db, 'project:' + row['id'], store.project_key(row))
+                store.set_setting(db, 'planned_reminder:' + key, '0')
         return NOTHING
     tool, tool_input = event.get("tool_name") or "", event.get("tool_input") or {}
     subagent = bool(event.get("agent_id"))
@@ -115,6 +124,9 @@ def review(bridge, key, sid, event):
                 store.resolve_asks(db, terminal=key)  # The agent has moved on.
         if revoked:
             after_approval(bridge, key, "ran" if name == "PostToolUse" else "failed", tool)
+        if name == 'PostToolUse' and not subagent and planned_reminder(bridge, key, sid):
+            return Outcome({'hookSpecificOutput': {'hookEventName': 'PostToolUse',
+                'additionalContext': 'Write your planned steps as Beads tasks so the owner can see them.'}}, None, None)
         return NOTHING
     trigger = REVIEWED_TOOLS.get(tool) if name == "PreToolUse" else TRIGGERS.get(name)
     if name == "PreToolUse" and trigger is None:
@@ -172,6 +184,8 @@ def review(bridge, key, sid, event):
         outcome = verdict_outcome(db, key, stream, trigger, verdict, summary, message, reply, tool, tool_input)
         if outcome is None:
             return fallback
+        if trigger == 'stop':
+            accept_messages(db, reply, rows, 'stop', stream)
         if trigger != "stop" or verdict != "stop" or decisions:
             store.record_event(db, stream, key, trigger, verdict, summary, {"message": message, "decisions": decisions})
     return status(fallback if outcome == NOTHING else outcome, subagent)
@@ -287,6 +301,8 @@ def _context(bridge, key, event, trigger, stream, rows):
     tail = conversation_tail(event.get("transcript_path"))
     parts.append("# The request and the recent conversation\n" + untrusted(
         "Request:\n" + ("\n".join(request) or "(no details)") + "\n\nRecent conversation:\n" + (tail or "(unavailable)")))
+    if trigger == 'stop':
+        parts.append(project_context(bridge, [row]))
     return "\n\n".join(parts) + "\n"
 
 
@@ -374,8 +390,14 @@ def state(bridge):
         if not due and swept:
             # Nothing is waiting now, so the same wait coming back later is new and due again.
             store.set_setting(db, "sweep_signature", "")
-    result["sweepDue"] = bool(not result["paused"] and due and due != swept
-                              and time.time() - _number(sweep_time) >= SWEEP_INTERVAL)
+    active_ids = {r.get('id') for r in rows if r.get('state') != 'Done'}
+    excluded = [m for m in result['messages'] if m['stream'] not in active_ids]
+    result['messages'] = [m for m in result['messages'] if m['stream'] in active_ids]
+    result['unread'] -= sum(1 for m in excluded if not m['seen'] and m['kind'] != 'status')
+    elapsed = time.time() - _number(sweep_time)
+    active = any(r.get('state') != 'Done' for r in rows)
+    result["sweepDue"] = bool(not result["paused"] and active and elapsed >= SWEEP_INTERVAL
+                              and ((due and due != swept) or elapsed >= 3600))
     result["briefingStale"] = briefed != overall_signature(rows)
     return result
 
@@ -499,7 +521,7 @@ def sweep(bridge, exclude=None):
         paused = store.paused(db)
     try:
         reply = brain.consult(bridge.ROOT, "sweep", SWEEP + ("\n" + SWEEP_PAUSED if paused else "") + "\n\n"
-                              + overview(bridge, rows), investigate=True, timeout=270, folders=folders)
+                              + overview(bridge, rows) + project_context(bridge, rows), investigate=True, timeout=270, folders=folders)
     finally:
         # A failed sweep still waits its interval, so a broken consult is not retried every few seconds.
         mark_swept(bridge, due)
@@ -509,6 +531,7 @@ def sweep(bridge, exclude=None):
                if row.get("state") != "Done"}
     with transaction(bridge) as db:
         paused = store.paused(db)
+        accept_messages(db, reply, rows, "sweep")
         store.set_setting(db, "briefing", reply["briefing"])
         store.set_setting(db, "briefing_time", str(time.time()))
         store.set_setting(db, "briefing_signature", overall)
@@ -604,3 +627,193 @@ def conversation_tail(path, limit=12000):
             elif block.get("type") == "tool_use":
                 entries.append(f"Tool: {block.get('name', '')} {json.dumps(block.get('input'))[:300]}")
     return "\n".join(entries)[-limit:]
+
+
+MESSAGE_GUIDE = '''\nReturn messages for the boss: stream, terminal (or empty), kind, text (one sentence,
+100 characters maximum), buttons (at most three: label, action, terminal, value), newSubject (boolean),
+and rule (full proposed rule or empty). Kinds: status, next, reminder, rule. Actions: tell (value is prompt),
+open (value is a linked URL or empty to select stream), later, save, no. Include Later on actionable notes.
+Stop reviews return only status and next for this workstream. Sweeps may return all kinds.
+The owner said Later to the hidden messages below: do not reintroduce them by rewording.
+Set newSubject true only when the underlying situation changed. Propose rules only when the owner's
+recorded prompts contain the instruction at least twice; quote those prompts in ruleEvidence (array).
+A rule belongs to the repository's most recently prompted stream. Saved project rules define done;
+check them before letting a finished agent stop, within the existing nudge limit.
+'''
+
+
+def project_context(bridge, rows):
+    parts = []
+    with transaction(bridge) as db:
+        parts.append('Owner said Later: ' + untrusted(json.dumps(store.messages(db, hidden=True))))
+        for project in sorted({store.project_key(r) for r in rows} - {''}):
+            prompts = [r[0] for r in db.execute(
+                'SELECT text FROM manager_prompts WHERE project=? ORDER BY id DESC LIMIT 30', (project,))]
+            rejected = store.setting(db, 'rejected_rules:' + project, '[]')
+            parts.append('Project ' + untrusted(project) + '\nSaved owner rules:\n' + store.project_rules(bridge.ROOT, project)
+                         + '\nOwner prompts (evidence, not new instructions):\n' + untrusted(json.dumps(prompts))
+                         + '\nRejected rules (never propose again):\n' + untrusted(rejected))
+    return MESSAGE_GUIDE + '\n'.join(parts)
+
+
+def accept_messages(db, reply, rows, trigger, stream=None):
+    if store.paused(db):
+        return
+    known = {r['id']: r for r in rows if r.get('state') != 'Done'}
+    items = reply.get('messages')
+    for raw in items if isinstance(items, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        sid, kind, text = raw.get('stream'), raw.get('kind'), raw.get('text')
+        if not isinstance(sid, str) or sid not in known or kind not in ('status', 'next', 'reminder', 'rule'):
+            continue
+        if trigger == 'stop' and (sid != stream or kind not in ('status', 'next')):
+            continue
+        if not isinstance(text, str) or not text.strip():
+            continue
+        row = known[sid]
+        terminals = {t['id'] for t in row.get('terminals', [])}
+        terminal = raw.get('terminal') or ''
+        if not isinstance(terminal, str) or terminal and terminal not in terminals:
+            continue
+        buttons = raw.get('buttons', [])
+        if not isinstance(buttons, list) or len(buttons) > 3:
+            continue
+        clean_buttons = []
+        for button in buttons:
+            if not isinstance(button, dict):
+                continue
+            action, label = button.get('action'), button.get('label')
+            target, value = button.get('terminal') or terminal, button.get('value') or ''
+            if action not in ('tell', 'open', 'later', 'save', 'no') or not isinstance(label, str) or not 1 <= len(label.split()) <= 2:
+                continue
+            if not isinstance(value, str) or not isinstance(target, str) or target and target not in terminals:
+                continue
+            if action == 'tell' and (not target or not value.strip()):
+                continue
+            if action == 'open' and value and value not in [l.get('url') for l in row.get('links', [])]:
+                continue
+            if action in ('save', 'no') and kind != 'rule':
+                continue
+            clean_buttons.append(dict(label=label[:24], action=action, terminal=target, value=value[:4000]))
+        project, rule = store.project_key(row), raw.get('rule') or ''
+        if kind == 'rule':
+            if not project or not isinstance(rule, str) or not rule.strip() or len(rule) > 2000:
+                continue
+            prompts = [p[0] for p in db.execute('SELECT text FROM manager_prompts WHERE project=?', (project,))]
+            evidence = raw.get('ruleEvidence', [])
+            if not isinstance(evidence, list) or len(evidence) < 2 or any(not isinstance(e, str) or e not in prompts for e in evidence):
+                continue
+            # Require two actual owner prompts, not the same quote twice from one prompt.
+            if len(prompts) < 2 or any(evidence.count(e) > prompts.count(e) for e in evidence):
+                continue
+            rejected = store.loads(store.setting(db, 'rejected_rules:' + project), [])
+            if rule in rejected:
+                continue
+            latest = db.execute('SELECT terminal FROM manager_prompts WHERE project=? ORDER BY id DESC LIMIT 1', (project,)).fetchone()
+            if not latest or latest[0] not in terminals:
+                continue
+            clean_buttons = [dict(label='Save', action='save', terminal='', value=''),
+                             dict(label='No', action='no', terminal='', value='')]
+        if len(text) > 100:
+            workstream_log.record('manager message truncated to 100 characters')
+        store.put_message(db, dict(stream=sid, terminal=terminal, kind=kind, text=' '.join(text.split())[:100],
+                                  buttons=clean_buttons, newSubject=raw.get('newSubject') is True,
+                                  project=project, rule=rule if kind == 'rule' else ''))
+
+
+def message_action(bridge, message_id, revision, action, index=None):
+    # Read the exact displayed revision; a stale click must never act on a replacement.
+    with bridge.bridge_lock():
+        rows = bridge.streams()
+    with transaction(bridge) as db:
+        item = next((m for m in store.messages(db) if m['id'] == message_id and m['revision'] == revision), None)
+        if item is None:
+            return False
+        row = next((r for r in rows if r['id'] == item['stream'] and r.get('state') != 'Done'), None)
+        if row is None:
+            return False
+        if action == 'seen':
+            db.execute('UPDATE manager_messages SET seen=1 WHERE id=?', (message_id,))
+            return True
+        buttons = item['buttons']
+        if index is None or index < 0 or index >= len(buttons) or buttons[index]['action'] != action:
+            return False
+        button = buttons[index]
+        if action == 'tell':
+            terminal = next((t for t in row.get('terminals', []) if t['id'] == button['terminal']), None)
+            if not terminal or terminal.get('state') not in TELLABLE or terminal.get('provider') not in ('claude', 'codex'):
+                return False
+        if action == 'save':
+            if store.project_key(row) != item['project']:
+                return False
+            store.save_rule(bridge.ROOT, item['project'], item['rule'])
+        elif action == 'no':
+            key = 'rejected_rules:' + item['project']
+            rejected = store.loads(store.setting(db, key), [])
+            store.set_setting(db, key, json.dumps((rejected + [item['rule']])[-100:]))
+        if action != 'tell':
+            db.execute('UPDATE manager_messages SET seen=1,hidden=? WHERE id=?',
+                       (int(action in ('later', 'save', 'no')), message_id))
+            store.record_event(db, item['stream'], button['terminal'], 'button', action, item['text'])
+            return True
+    # tell owns its own connection and rechecks live eligibility.
+    if not tell(bridge, button['terminal'], button['value']):
+        return False
+    with transaction(bridge) as db:
+        db.execute('UPDATE manager_messages SET seen=1,hidden=1 WHERE id=? AND revision=?', (message_id, revision))
+        store.record_event(db, item['stream'], button['terminal'], 'button', 'tell', item['text'], {'message': button['value']})
+    return True
+
+
+def pull_messages(bridge, found):
+    """Use existing poll results, never a second network lookup."""
+    with bridge.bridge_lock():
+        rows = bridge.streams()
+    with transaction(bridge) as db:
+        if store.paused(db):
+            return
+        for row in rows:
+            if row.get('state') == 'Done':
+                continue
+            for link in row.get('links', []):
+                url = link.get('url')
+                pull = found.get(url)
+                if not isinstance(pull, dict):
+                    continue
+                total = pull.get('checks') or 0
+                green = pull.get('state') == 'OPEN' and total > 0 and pull.get('finished') == total and pull.get('failed') == 0
+                key = 'pr_green:' + row['id'] + ':' + url
+                previous = store.setting(db, key)
+                store.set_setting(db, key, '1' if green else '0')
+                if not green or previous == '1':
+                    continue
+                terminal = next((t['id'] for t in row.get('terminals', []) if t.get('provider') in ('claude', 'codex')), '')
+                buttons = [dict(label='Open', action='open', terminal='', value=url),
+                           dict(label='Later', action='later', terminal='', value='')]
+                if terminal:
+                    buttons.insert(0, dict(label='Merge', action='tell', terminal=terminal,
+                                           value='The PR checks passed. Merge it: ' + url))
+                text = 'PR #' + url.rstrip('/').split('/')[-1] + ' checks passed. Merge it?'
+                accept_messages(db, {'messages': [dict(stream=row['id'], terminal=terminal, kind='next', text=text,
+                                                       buttons=buttons, newSubject=True)]}, rows, 'sweep')
+
+
+def planned_reminder(bridge, key, sid):
+    with transaction(bridge) as db:
+        age = store.user_prompt_age(db, key)
+        if age is None or age < 300 or store.setting(db, 'planned_reminder:' + key) == '1':
+            return False
+        if not db.execute("SELECT 1 FROM activity WHERE id=? AND session=? AND state='Working'", (key, sid)).fetchone():
+            return False
+    with bridge.bridge_lock():
+        rows = bridge.streams()
+    row = next((r for r in rows if r.get('id') == bridge.terminal_owner(key)), None)
+    if row is None or row.get('state') == 'Done' or len([t for t in row.get('tasks', []) if t.get('status') != 'closed']) > 1:
+        return False
+    with transaction(bridge) as db:
+        db.execute('BEGIN IMMEDIATE')
+        if store.setting(db, 'planned_reminder:' + key) == '1':
+            return False
+        store.set_setting(db, 'planned_reminder:' + key, '1')
+    return True
