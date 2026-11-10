@@ -48,7 +48,8 @@ def record_event(db, stream, terminal, trigger, verdict, summary, detail=None, n
 
 
 def open_ask(db, stream, terminal, summary, options, recommendation, now=None):
-    resolve_asks(db, terminal=terminal)
+    if terminal:
+        resolve_asks(db, terminal=terminal)
     return db.execute("""INSERT INTO manager_asks (time,stream,terminal,summary,options,recommendation)
         VALUES (?,?,?,?,?,?)""", (clock(now), stream, terminal, summary, json.dumps(list(options or [])),
                                  recommendation)).lastrowid
@@ -60,10 +61,17 @@ def resolve_asks(db, terminal=None, ask_id=None):
         query, args = query + " AND terminal=?", args + [terminal]
     if ask_id is not None:
         query, args = query + " AND id=?", args + [ask_id]
+        # Dismissing an ask answers it, so the loop guard starts again for its terminal.
+        row = db.execute("SELECT terminal FROM manager_asks WHERE id=? AND status='open'", (ask_id,)).fetchone()
+        if row and row[0]:
+            db.execute("UPDATE manager_terminals SET nudges=0 WHERE terminal=?", (row[0],))
     db.execute(query, args)
 
 
 def fingerprint(tool_name, tool_input):
+    if tool_name == "Bash" and isinstance(tool_input, dict):
+        # The model rewords the description when it retries the same command.
+        tool_input = {k: v for k, v in tool_input.items() if k != "description"}
     return hashlib.sha256(json.dumps([tool_name, tool_input], sort_keys=True).encode()).hexdigest()
 
 

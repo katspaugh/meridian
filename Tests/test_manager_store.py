@@ -49,9 +49,39 @@ class ManagerStoreTests(unittest.TestCase):
         self.assertEqual(store.user_prompt_age(self.db, "t1", now=150), 30)
 
     def test_stale_tell_does_not_hide_the_user(self):
+        store.add_nudge(self.db, "t1")
         store.note_tell(self.db, "t1", "Go with SQLite.", now=100)
         self.assertTrue(store.note_user_prompt(self.db, "t1", "Go with SQLite.", now=220))
-        self.assertIsNone(store.user_prompt_age(self.db, "t2", now=220))
+        self.assertEqual(store.user_prompt_age(self.db, "t1", now=230), 10)
+        self.assertEqual(store.nudges(self.db, "t1"), 0)
+
+    def test_bash_fingerprint_ignores_the_description(self):
+        store.approve(self.db, "t1", "Bash", {"command": "make dist", "description": "Build it"}, now=0)
+        self.assertTrue(store.approved(self.db, "t1", "Bash", {"command": "make dist", "description": "Package"}, now=1))
+        self.assertTrue(store.approved(self.db, "t1", "Bash", {"command": "make dist"}, now=1))
+        self.assertFalse(store.approved(self.db, "t1", "Bash", {"command": "make clean", "description": "Build it"}, now=1))
+        tool_input = {"file_path": "/x", "description": "a"}
+        self.assertNotEqual(store.fingerprint("Write", tool_input), store.fingerprint("Write", {"file_path": "/x"}))
+        bash = {"command": "ls", "description": "List"}
+        store.fingerprint("Bash", bash)
+        self.assertEqual(bash, {"command": "ls", "description": "List"})
+        self.assertEqual(store.fingerprint("Bash", "ls"), store.fingerprint("Bash", "ls"))
+
+    def test_terminal_less_asks_do_not_replace_each_other(self):
+        first = store.open_ask(self.db, "s1", "", "Merge order?", [], "", now=1)
+        second = store.open_ask(self.db, "s2", "", "Which host?", [], "", now=2)
+        self.assertEqual([a["id"] for a in store.state(self.db)["asks"]], [first, second])
+
+    def test_dismissing_an_ask_resets_its_terminals_nudges(self):
+        for _ in range(store.MAX_NUDGES):
+            store.add_nudge(self.db, "t1")
+            store.add_nudge(self.db, "t2")
+        ask = store.open_ask(self.db, "s1", "t1", "Stuck", [], "")
+        loose = store.open_ask(self.db, "s1", "", "Merge order?", [], "")
+        store.resolve_asks(self.db, ask_id=ask)
+        store.resolve_asks(self.db, ask_id=loose)
+        self.assertEqual((store.nudges(self.db, "t1"), store.nudges(self.db, "t2")), (0, store.MAX_NUDGES))
+        self.assertEqual(store.state(self.db)["asks"], [])
 
     def test_state_shape(self):
         store.record_event(self.db, "s1", "t1", "stop", "continue", "Sent it to the next task.",
