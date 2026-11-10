@@ -34,7 +34,7 @@ Their concrete pain was not knowing what is going on. They opened a workstream a
 
 ## Anti-goals
 
-- **A wall of text.** Anything in the slot that needs more than one line has failed.
+- **A wall of text.** Anything in the slot longer than one short sentence (100 characters, two lines at the inspector's width) has failed.
 - **Content that jumps.** A message arriving, changing, or going away must not move anything else in the inspector.
 - **A nag.** The same message must not come back after the owner said **Later** unless something changed.
 - **A manager that does the work.** Buttons that do something send a message to an agent or open something. The manager still never runs commands or changes files itself.
@@ -47,7 +47,7 @@ Today the bottom of the inspector shows the stream state ("● Working"), the fo
 
 ```
 ┌──────────────────────────────────┐
-│ ✦ "Unblock PR CI" is green.      │  ← manager slot: one line
+│ ✦ "Unblock PR CI" is green.      │  ← manager slot: one short sentence
 │   Merge it?                      │
 │   [Merge] [Open] [Later]         │  ← up to three buttons
 ├──────────────────────────────────┤
@@ -91,8 +91,8 @@ Messages come from two consults the manager already makes, plus two new sweep tr
 Each message has:
 
 - the workstream (and terminal, if it is about one)
-- its kind: status, next, or reminder
-- one line of text, at most 100 characters (the app cuts anything longer and logs that it did)
+- its kind: status, next, reminder, or rule proposal (open questions come from the existing ask flow and share the slot)
+- one short sentence, at most 100 characters (the app cuts anything longer and logs that it did)
 - up to three buttons, each a label of one or two words and an action (below)
 
 What each kind is for:
@@ -108,7 +108,9 @@ When it speaks:
 - **When the owner comes back.** If Muxteroid becomes the active app after 30 minutes or more away, it runs one sweep so the lines are fresh. (Call.)
 - **Hourly.** Reminders depend on how long something has waited, which no event reports. While the app is open and any workstream is not Done, a sweep runs at least once an hour, whether or not the change check fired. (Call.)
 
-"PR is green" needs PR check status. The Stop review and sweep may look it up with the read-only `gh` commands they already have; the app does not add PR polling for this. (Call.)
+**When a linked PR's checks finish.** The app already polls linked PRs every 60 seconds while a workstream is on screen. When every check on a linked PR has passed, the app itself writes a next message, "PR #123 checks passed. Merge it?" with **Merge** and **Open**, without a consult. Otherwise an agent that pushed and stopped while checks were pending would hear nothing until the next sweep. (Call.)
+
+Beyond that, "PR is green" needs PR check status. The Stop review and sweep may look it up with the read-only `gh` commands they already have; the app does not add PR polling for this. (Call.)
 
 When paused, the manager says nothing new. The Now line and the planned-steps rule still work, since they are app features, not manager consults.
 
@@ -118,7 +120,7 @@ A button does one of these:
 
 - **Tell:** types a message into one of the stream's Claude or Codex terminals, using the existing tell mechanism. **Merge** is a Tell: "The PR is green. Merge it." The agent does the merge, not the manager. Because the owner pressed the button, it is treated like a tell the owner asked for in chat: it may type into the terminal on screen. It still types only into an idle agent (Review or Ready). While the agent is busy the button is disabled, with "Agent is busy" on hover. (Call.)
 - **Open:** selects the stream, a terminal, or a link (PR, issue).
-- **Later:** hides this message. A later message with different text shows as normal; one with the same text stays hidden. (Call. There is no per-workstream change signature to compare against, and this avoids inventing one.)
+- **Later:** hides messages of this kind for this workstream. Put-off messages are passed into every later consult as "the owner said Later to this". A new message of that kind shows again only if the manager marks it as being about something new, not a rewording. (Call. The manager rewords on every consult, so matching on text would let a put-off reminder straight back in.)
 - **Save** / **No:** for a proposed rule (below).
 - **Details:** opens the Manager view at this message, for open questions whose full text does not fit.
 
@@ -180,12 +182,12 @@ The builder must check that the after-tool hook's extra context reaches Claude i
 
 - Python unit tests, with the `claude` call stubbed: sweep messages are stored, validated, cut to length, and replaced by kind; Later hides until the signature changes; button actions map to the right effect and respect the tell rules; prompts are recorded per repository; project rules reach agent context and Stop reviews; the planned-steps reminder fires once and only under its conditions; paused means no new messages.
 - The Now line's phrase for each common tool.
-- Build the app and check the slot in the offscreen render harness: empty, one message, three messages, an open question, and a long message cut to one line. Check that the inspector's content does not move between these states.
+- Build the app and check the slot in the offscreen render harness: empty, one message, three messages, an open question, and a long message cut to 100 characters. Check that the inspector's content does not move between these states.
 
 ## Left to the builder
 
 - Table layouts, JSON shapes, file names.
 - The exact phrases for each tool in the Now line.
-- The slot's visual design, consistent with the inspector and the Pipeline section. It must hold one 100-character line plus a row of buttons at the inspector's normal width without changing height.
+- The slot's visual design, consistent with the inspector and the Pipeline section. It must hold a 100-character message (two lines) plus a row of buttons at the inspector's normal width without changing height.
 - How the prompt history and project rules are trimmed to fit a consult.
 - The wording of the role prompt changes.
