@@ -10,7 +10,9 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
     let store = Store()
     let manager = ManagerStore()
     /// The workstream terminal on screen; sweeps never type into it while the app is active.
-    var focusedTerminal: String?
+    var focusedTerminal: String? { didSet { reportFocus() } }
+    private var reportedFocus: String?
+    private var focusReport: Task<Void, Never>?
     private let center = UNUserNotificationCenter.current()
     private let defaultsKey = "presentedAttentionRequests"
     private let log = Logger(subsystem: "local.muxteroid.app", category: "notifications")
@@ -23,6 +25,22 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         // Workstreams are persisted and their dtach processes outlive this UI.
         // Quitting is not a request to close any terminal sessions.
         .terminateNow
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) { reportFocus() }
+    func applicationDidResignActive(_ notification: Notification) { reportFocus() }
+
+    /// A sweep consults for minutes, so the bridge re-reads this just before it types.
+    private func reportFocus() {
+        let id = NSApp.isActive ? focusedTerminal ?? "" : ""
+        guard id != reportedFocus else { return }
+        reportedFocus = id
+        // Reports run in order, so an older one never lands last.
+        let previous = focusReport
+        focusReport = Task {
+            await previous?.value
+            _ = try? await Bridge.run(["manager-focus", id])
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

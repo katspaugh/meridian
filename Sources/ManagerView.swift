@@ -117,7 +117,10 @@ struct ManagerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             if state == nil { await store.refresh() }
-            guard let state, !state.paused, state.briefing.isEmpty || state.briefingStale else { return }
+            // Opening the view is not a request for a consult; an out-of-date briefing waits ten minutes.
+            guard let state, !state.paused, state.briefing.isEmpty
+                    || (state.briefingStale && Date().timeIntervalSince1970 - (state.briefingTime ?? 0) > 600)
+            else { return }
             await store.sweep(excluding: focusedTerminal)
         }
         .task(id: state?.events.map(\.id).max()) {
