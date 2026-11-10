@@ -286,11 +286,6 @@ def hook(key, sid):
         with database() as db:
             links.tool_result(db, key, event.get("tool_name", ""), event.get("tool_input", {}),
                               event.get("tool_response", ""), event.get("cwd"), live=True)
-        if not event.get("agent_id"):
-            # A separate connection: the links above are already committed.
-            with database() as db:
-                tracker.guarded(db, None, tracker.tool_event, db, key, event.get("tool_name", ""),
-                                event.get("tool_input") or {}, event.get("tool_response"), time.time())
     if event.get("agent_id"):
         with database() as db:
             subagents.record(db, key, sid, event)
@@ -311,6 +306,12 @@ def hook(key, sid):
     with database() as db:
         db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
                    (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"), key, sid))
+    if name == "PostToolUse":
+        # Subagent events returned above. Its own connection, after the state
+        # update, so a wait on the run's write lock never delays the state.
+        with database() as db:
+            tracker.guarded(db, None, tracker.tool_event, db, key, event.get("tool_name", ""),
+                            event.get("tool_input") or {}, event.get("tool_response"), time.time())
 
     if name in ("SessionStart", "UserPromptSubmit"):
         print(json.dumps({"hookSpecificOutput": {
