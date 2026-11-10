@@ -10,9 +10,12 @@ import workstream_log
 ROLE = Path(__file__).resolve().with_name("manager_role.md")
 TOOLS = ["Read", "Grep", "Glob"]
 INVESTIGATE_TOOLS = ["WebFetch", "WebSearch", "Bash"]
+# No git: a repository's own config can make git run programs, and agents own those repositories.
 INVESTIGATE_RULES = [f"Bash({command} *)" for command in (
-    "git log", "git diff", "git status", "git show", "gh pr view", "gh pr list", "gh pr checks",
-    "gh issue view", "gh run view", "gh run list", "bd show", "bd list", "bd ready", "bd children")]
+    "gh pr view", "gh pr list", "gh pr checks", "gh issue view", "gh run view", "gh run list",
+    "bd show", "bd list", "bd ready", "bd children")]
+# --output writes a file; --web opens the boss's browser.
+INVESTIGATE_DENIED = ["Bash(*--output*)", "Bash(*--web*)"]
 VERDICTS = {"permission": ["allow", "deny", "ask"], "denied": ["approve", "uphold", "ask"],
             "question": ["answer", "ask"], "plan": ["approve", "revise", "ask"],
             "stop": ["stop", "continue", "ask"]}
@@ -43,7 +46,7 @@ def _manager(root):
 def config(root):
     result = {"model": "fable", "effort": "high"}
     try:
-        override = json.loads((_manager(root) / "config.json").read_text())
+        override = json.loads((_manager(root) / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return result
     if isinstance(override, dict):
@@ -53,8 +56,8 @@ def config(root):
 
 def notes(root):
     try:
-        return (_manager(root) / "notes.md").read_text()
-    except FileNotFoundError:
+        return (_manager(root) / "notes.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
         return ""
 
 
@@ -64,18 +67,19 @@ def remember(root, items):
     if not lines:
         return
     _manager(root).mkdir(parents=True, exist_ok=True)
-    with open(_manager(root) / "notes.md", "a") as f:
+    with open(_manager(root) / "notes.md", "a", encoding="utf-8") as f:
         f.write("".join(lines))
 
 
 def schema(trigger):
     if trigger == "sweep":
-        return _object({"summary": STRING, "briefing": STRING, "actions": ACTIONS, "asks": ASKS,
-                        "remember": STRINGS}, ["summary", "briefing", "actions"])
+        return _object({"summary": STRING, "briefing": STRING, "actions": ACTIONS, "asks": ASKS},
+                       ["summary", "briefing", "actions"])
     if trigger == "chat":
+        # Notes go into the system prompt, so only the boss's own chat may add to them.
         return _object({"reply": STRING, "actions": ACTIONS, "remember": STRINGS}, ["reply", "actions"])
     properties = {"verdict": {"type": "string", "enum": VERDICTS[trigger]}, "summary": STRING,
-                  "message": STRING, "ask": ASK, "decisions": DECISIONS, "remember": STRINGS}
+                  "message": STRING, "ask": ASK, "decisions": DECISIONS}
     if trigger == "question":
         properties["answers"] = {"type": "object", "additionalProperties": STRING}
     return _object(properties, ["verdict", "summary", "message"])
@@ -83,7 +87,8 @@ def schema(trigger):
 
 def _environment(root):
     env = {k: v for k, v in os.environ.items()
-           if k not in ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT") and not k.startswith("CLAUDE_CODE_")}
+           if k not in ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+           and not k.startswith("CLAUDE_CODE_")}
     env["BEADS_DIR"] = str(Path(root) / ".beads")
     return env
 
@@ -92,11 +97,14 @@ def _command(claude, root, trigger, investigate, session, resume, folders):
     settings = config(root)
     tools = TOOLS + (INVESTIGATE_TOOLS if investigate else [])
     rules = [t for t in tools if t != "Bash"] + (INVESTIGATE_RULES if investigate else [])
-    prompt = ROLE.read_text().rstrip("\n") + "\n\n# Your notes\n" + notes(root)
-    args = [claude, "-p", "--safe-mode", "--model", str(settings["model"]), "--effort", str(settings["effort"]),
+    prompt = ROLE.read_text(encoding="utf-8").rstrip("\n") + "\n\n# Your notes\n" + notes(root)
+    # The consult's folder has no project settings, so the boss's own permission rules cannot widen its tools.
+    args = [claude, "-p", "--safe-mode", "--setting-sources", "project", "--model", str(settings["model"]), "--effort", str(settings["effort"]),
             "--output-format", "json", "--json-schema", json.dumps(schema(trigger)),
             "--system-prompt", prompt, "--tools", ",".join(tools), "--allowedTools", *rules,
             "--permission-mode", "dontAsk"]
+    if investigate:
+        args += ["--disallowedTools", *INVESTIGATE_DENIED]
     for folder in folders:
         if os.path.isdir(folder):
             args += ["--add-dir", str(folder)]
@@ -119,7 +127,7 @@ def consult(root, trigger, context, investigate=False, timeout=150, session=None
         required = schema(trigger)["required"]
         cwd = _manager(root)
         cwd.mkdir(parents=True, exist_ok=True)
-        p = subprocess.run(args, input=context, capture_output=True, text=True, timeout=timeout,
+        p = subprocess.run(args, input=context, capture_output=True, text=True, encoding="utf-8", timeout=timeout,
                            cwd=str(cwd), env=_environment(root))
     except subprocess.TimeoutExpired:
         return fail("timeout")

@@ -1,3 +1,4 @@
+import contextlib
 import json
 from pathlib import Path
 import subprocess
@@ -12,6 +13,19 @@ import manager_brain as brain
 
 def reply(output):
     return Mock(returncode=0, stdout=json.dumps({"is_error": False, "structured_output": output}))
+
+
+def ascii_locale():
+    """Makes files opened without an explicit encoding decode as ASCII, as under a C locale."""
+    stack = contextlib.ExitStack()
+    stack.enter_context(patch("locale.getpreferredencoding", return_value="ascii"))
+    try:
+        import _bootlocale  # Python 3.9 reads the default encoding from here.
+    except ImportError:
+        pass
+    else:
+        stack.enter_context(patch.object(_bootlocale, "getpreferredencoding", return_value="ascii"))
+    return stack
 
 
 class ManagerBrainTests(unittest.TestCase):
@@ -32,7 +46,8 @@ class ManagerBrainTests(unittest.TestCase):
 
     def test_returns_structured_output_and_builds_the_command(self):
         environ = {"PATH": "/usr/bin", "CLAUDECODE": "1", "CLAUDE_PID": "7", "CLAUDE_EFFORT": "low",
-                   "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SSE_PORT": "1234"}
+                   "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SSE_PORT": "1234", "ANTHROPIC_API_KEY": "sk-x",
+                   "ANTHROPIC_AUTH_TOKEN": "tok"}
         with patch.dict(brain.os.environ, environ, clear=True):
             result = brain.consult(self.root, "permission", "CONTEXT")
         self.assertEqual(result["verdict"], "allow")
@@ -46,11 +61,14 @@ class ManagerBrainTests(unittest.TestCase):
         self.assertEqual(args[args.index("--allowedTools") + 1:args.index("--permission-mode")], ["Read", "Grep", "Glob"])
         self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
         self.assertIn("--safe-mode", args)
+        self.assertEqual(args[args.index("--setting-sources") + 1], "project")
+        self.assertNotIn("--disallowedTools", args)
         self.assertIn("--no-session-persistence", args)
         self.assertNotIn("--add-dir", args)
         self.assertNotIn("updatedPermissions", " ".join(args))
         self.assertEqual(options["input"], "CONTEXT")
         self.assertEqual(options["timeout"], 150)
+        self.assertEqual((options["text"], options["encoding"]), (True, "utf-8"))
         self.assertEqual(Path(options["cwd"]), self.root / "manager")
         self.assertTrue((self.root / "manager").is_dir())
         self.assertEqual(options["env"], {"PATH": "/usr/bin", "BEADS_DIR": str(self.root / ".beads")})
@@ -92,12 +110,16 @@ class ManagerBrainTests(unittest.TestCase):
         args = self.args()
         self.assertEqual(args[args.index("--tools") + 1], "Read,Grep,Glob,WebFetch,WebSearch,Bash")
         rules = args[args.index("--allowedTools") + 1:args.index("--permission-mode")]
-        self.assertIn("Bash(git log *)", rules)
+        self.assertIn("Bash(gh pr view *)", rules)
         self.assertIn("Bash(bd children *)", rules)
         self.assertIn("WebSearch", rules)
-        self.assertEqual(len(rules), 19)
+        self.assertEqual(len(rules), 15)
         self.assertNotIn("Bash", rules)
         self.assertFalse([r for r in rules if r.startswith("Bash") and not r.endswith(" *)")])
+        # Git runs programs named in a repository's own config, and agents own those repositories.
+        self.assertFalse([r for r in rules if "git" in r.split("(")[-1].split()[0]])
+        start = args.index("--disallowedTools") + 1
+        self.assertEqual(args[start:start + 2], ["Bash(*--output*)", "Bash(*--web*)"])
 
     def test_config_override(self):
         (self.root / "manager").mkdir()
@@ -123,6 +145,33 @@ class ManagerBrainTests(unittest.TestCase):
         brain.consult(self.root, "permission", "CONTEXT")
         prompt = self.args()[self.args().index("--system-prompt") + 1]
         self.assertTrue(prompt.endswith("\n\n# Your notes\n- Prefer SQLite.\n- Ship small PRs.\n- Never touch prod.\n"))
+
+    def test_notes_and_config_read_utf8_and_unreadable_notes_are_empty(self):
+        (self.root / "manager").mkdir()
+        (self.root / "manager/notes.md").write_bytes("- Prefer café.\n".encode("utf-8"))
+        (self.root / "manager/config.json").write_bytes('{"model": "opus", "note": "é"}'.encode("utf-8"))
+        with ascii_locale():
+            self.assertEqual(brain.notes(self.root), "- Prefer café.\n")
+            self.assertEqual(brain.config(self.root)["model"], "opus")
+            brain.remember(self.root, ["Ship naïve fixes."])
+            self.assertTrue(brain.notes(self.root).endswith("- Ship naïve fixes.\n"))
+            brain.consult(self.root, "permission", "CONTEXT")
+        self.assertIn("- Prefer café.", self.args()[self.args().index("--system-prompt") + 1])
+        (self.root / "manager/notes.md").write_bytes(b"\xff\xfe bad")
+        self.assertEqual(brain.notes(self.root), "")
+        (self.root / "manager/notes.md").unlink()
+        (self.root / "manager/notes.md").mkdir()
+        self.assertEqual(brain.notes(self.root), "")
+
+    def test_role_covers_background_work_and_honest_briefings(self):
+        role = brain.ROLE.read_text(encoding="utf-8")
+        background = ("If an agent stops while background work it started is still running, it is probably waiting "
+                      "for that work, not stuck. Let it stop.")
+        honest = ("A briefing describes where the work stands. Never say in a briefing or a chat reply that you have "
+                  "done something: the app carries out the actions you return and records the ones that succeeded. "
+                  "Say what you are asking for instead.")
+        self.assertLess(role.index(background), role.index(honest))
+        self.assertLess(role.index(honest), role.index("You direct; you do not do the work."))
 
     def test_sessions(self):
         brain.consult(self.root, "chat", "CONTEXT", session="abc", resume=True)
@@ -152,7 +201,8 @@ class ManagerBrainTests(unittest.TestCase):
             self.assertEqual(s["type"], "object")
             self.assertEqual(s["properties"]["verdict"]["enum"], verdicts)
             self.assertEqual(sorted(s["required"]), ["message", "summary", "verdict"])
-            self.assertTrue({"ask", "decisions", "remember"} <= set(s["properties"]))
+            self.assertTrue({"ask", "decisions"} <= set(s["properties"]))
+            self.assertNotIn("remember", s["properties"])
         self.assertIn("answers", brain.schema("question")["properties"])
         self.assertNotIn("answers", brain.schema("stop")["properties"])
 
@@ -165,6 +215,7 @@ class ManagerBrainTests(unittest.TestCase):
         self.assertEqual(chat["properties"]["actions"], sweep["properties"]["actions"])
         self.assertIn("asks", sweep["properties"])
         self.assertIn("remember", chat["properties"])
+        self.assertNotIn("remember", sweep["properties"])
         self.assertNotIn("verdict", sweep["properties"])
 
     def test_required_keys_follow_the_trigger(self):
