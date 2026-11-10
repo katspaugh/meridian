@@ -10,7 +10,9 @@ struct DocumentWindow: View {
     @State private var checked = false
 
     var body: some View {
-        Group {
+        // A real container keeps the loading task attached while content is absent.
+        // An empty Group in a WindowGroup can leave the window blank without starting it.
+        ZStack {
             if let text {
                 ScrollView {
                     Markdown(text)
@@ -25,6 +27,8 @@ struct DocumentWindow: View {
                 }
             } else if checked {
                 ContentUnavailableView("Document not found", systemImage: "doc.questionmark", description: Text(url.path))
+            } else {
+                ProgressView("Loading document…")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
