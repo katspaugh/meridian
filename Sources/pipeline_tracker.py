@@ -6,6 +6,7 @@ write lock from the read until the commit.
 """
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -30,6 +31,8 @@ def initialize(db):
     db.execute("""CREATE TABLE IF NOT EXISTS pipeline_docs
                (stream TEXT, path TEXT, kind TEXT, title TEXT, mtime REAL, PRIMARY KEY(stream,path))""")
     db.execute("CREATE TABLE IF NOT EXISTS pipeline_scans (stream TEXT PRIMARY KEY, signature TEXT NOT NULL)")
+    # Completed workstreams: their events never change a run or list a document.
+    db.execute("CREATE TABLE IF NOT EXISTS pipeline_closed (stream TEXT PRIMARY KEY)")
 
 
 def owner(db, key):
@@ -37,13 +40,54 @@ def owner(db, key):
     return row[0] if row else key
 
 
-def _is_run(run):
-    if not isinstance(run, dict) or not isinstance(run.get("tasks"), list):
+def is_closed(db, stream):
+    return db.execute("SELECT 1 FROM pipeline_closed WHERE stream=?", (stream,)).fetchone() is not None
+
+
+STATUSES = ("todo", "running", "done", "failed", "skipped")
+
+
+def _is_int(value, least, most):
+    return isinstance(value, int) and not isinstance(value, bool) and least <= value <= most
+
+
+def _is_time(value):
+    # JSON numbers only: NaN or infinity would make the list output unreadable.
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except OverflowError:
         return False
-    phases = run.get("phases")
-    return isinstance(phases, dict) and all(
-        isinstance(phases.get(phase), dict) and isinstance(phases[phase].get("status"), str)
-        for phase in pipeline.PHASES)
+
+
+def _is_stamp(stamp):
+    return (isinstance(stamp, dict) and stamp.get("status") in STATUSES
+            and all(_is_time(stamp[key]) for key in ("startedAt", "endedAt") if key in stamp))
+
+
+def _is_task(task):
+    return (isinstance(task, dict) and _is_int(task.get("n"), 1, pipeline.MAX_NUMBER)
+            and isinstance(task.get("title"), str) and _is_stamp(task.get("implement")) and _is_stamp(task.get("review"))
+            and ("round" not in task or _is_int(task["round"], 0, pipeline.MAX_NUMBER)))
+
+
+# Each optional field and the test its value must pass when present.
+OPTIONAL_FIELDS = {
+    "pr": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "prUrl": lambda value: isinstance(value, str),
+    "ciDetail": lambda value: isinstance(value, str),
+    "currentTask": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "ledgerMtime": _is_time,
+}
+
+
+def _is_run(run):
+    """Every field render reads has the type it expects, so a stored run can always be listed."""
+    if not isinstance(run, dict) or not isinstance(run.get("name"), str) or not _is_time(run.get("launchedAt")):
+        return False
+    phases, tasks = run.get("phases"), run.get("tasks")
+    return (isinstance(phases, dict) and all(_is_stamp(phases.get(phase)) for phase in pipeline.PHASES)
+            and isinstance(tasks, list) and all(_is_task(task) for task in tasks)
+            and all(test(run[field]) for field, test in OPTIONAL_FIELDS.items() if field in run))
 
 
 def load(db, stream):
@@ -93,6 +137,9 @@ def record_document(db, stream, kind, path, now, created=True):
     """created false lists the document but never lets it start a run."""
     # One file has one row, whichever spelling (a symlinked folder) reached it.
     path = os.path.realpath(path)
+    # A link to another kind of file is no document: Open in Editor would launch it.
+    if not path.endswith(".md") or is_closed(db, stream):
+        return
     try:
         text = Path(path).read_text(encoding="utf-8")
         mtime = os.stat(path).st_mtime
@@ -130,10 +177,13 @@ def tool_event(db, key, name, args, response, now):
     if not isinstance(name, str) or not isinstance(args, dict):
         return
     stream = owner(db, key)
+    if is_closed(db, stream):
+        return
     lower = name.lower()
     if name == "Skill":
         skill = _text_argument(args, "skill")
-        if skill is not None:
+        # Only a starter can begin a run, so other skills take no write lock without one.
+        if skill is not None and (pipeline.is_starter(skill) or load(db, stream) is not None):
             update(db, stream, lambda run: pipeline.skill_event(run, skill, now))
     elif name in ("Write", "Edit"):
         path = _text_argument(args, "file_path")
@@ -163,7 +213,12 @@ def _workspace_plan(workspace):
 
 
 def command_event(db, key, command, output, now):
+    # Most commands are not the pipeline's, and cost a live run no write.
+    if not pipeline.may_change_run(command):
+        return
     stream = owner(db, key)
+    if is_closed(db, stream):
+        return
     workspace = pipeline.workspace_path(command, output)
     if workspace is None:
         # Only a workspace can start a run, so other commands take no write lock without one.
@@ -192,21 +247,26 @@ def pr_view(url):
 def poll_pull_requests(db, streams, now, view=None):
     """Apply gh's view of each live run's pull request; gh runs with no transaction open."""
     view = view or pr_view
-    for stream in streams:
+
+    def poll_pull_request(stream):
         run = load(db, stream)
         url = run.get("prUrl") if run is not None else None
         if not isinstance(url, str) or not url or pipeline.is_finished(run):
-            continue
+            return
         answer = view(url)
         if not isinstance(answer, dict):
-            continue
+            return
 
-        def change(run, url=url, answer=answer):
+        def change(run):
             # A hook may have finished the run or opened another pull request while gh ran.
             if run is None or pipeline.is_finished(run) or run.get("prUrl") != url:
                 return run
             return pipeline.apply_pr_view(run, answer, now)
         update(db, stream, change)
+
+    # One workstream's failure is logged and the others are still polled.
+    for stream in streams:
+        guarded(db, None, poll_pull_request, stream)
 
 
 def timestamp(text):
@@ -350,12 +410,27 @@ def snapshot(db, stream, root, *, created, own_worktree, closed, waiting, active
     A refresh in which no file changed only reads: list runs every three
     seconds for every workstream while hooks contend for the write lock.
     """
+    # Written only when the workstream is completed or reopened, and before the scan,
+    # so a reopened workstream's record_document is no longer turned away.
+    if closed != is_closed(db, stream):
+        if closed:
+            db.execute("INSERT OR IGNORE INTO pipeline_closed VALUES (?)", (stream,))
+        else:
+            db.execute("DELETE FROM pipeline_closed WHERE stream=?", (stream,))
+        db.commit()
     if not closed:
         _scan(db, stream, root, created, own_worktree, now)
         _poll_ledger(db, stream, root, now)
     documents = _documents(db, stream)
     run = load(db, stream)
-    view = pipeline.render(run, now, waiting, active_agents, frozen=closed) if run is not None else None
+    if run is None:
+        return None, documents
+    try:
+        view = pipeline.render(run, now, waiting, active_agents, frozen=closed)
+    except Exception as error:
+        # The documents are still listed, and Clear Pipeline stays in reach.
+        trace.error(f"pipeline failed type={type(error).__name__} in=render")
+        return None, documents
     return view, documents
 
 

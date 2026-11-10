@@ -131,6 +131,107 @@ class TrackerTests(unittest.TestCase):
         self.post('mx-example', 'Skill', {'skill': 'superpowers:brainstorming'})
         self.assertEqual(self.run_state()['phases']['brainstorm']['status'], 'running')
 
+    def test_wrongly_typed_runs_count_as_none_and_are_replaced(self):
+        good = pipeline.advance_to(pipeline.new_run(5.0), 'execute', 5.0)
+        task = {'n': 1, 'title': 'One', 'implement': {'status': 'todo'}, 'review': {'status': 'todo'}}
+        spoiled = [dict(good, name=None), dict(good, launchedAt='2026'), dict(good, launchedAt=True),
+                   dict(good, launchedAt=float('nan')), dict(good, tasks=[{'n': 1}]),
+                   dict(good, tasks=[dict(task, n=True)]), dict(good, tasks=[dict(task, n=10000)]),
+                   dict(good, tasks=[dict(task, round=-1)]), dict(good, tasks=[dict(task, title=None)]),
+                   dict(good, tasks=[dict(task, review={'status': 'later'})]),
+                   dict(good, phases=dict(good['phases'], plan={'status': 'done', 'endedAt': 'noon'})),
+                   dict(good, pr='12'), dict(good, prUrl=12), dict(good, ciDetail=['x']), dict(good, currentTask=1.5),
+                   dict(good, ledgerMtime='x')]
+        with streams.database() as db:
+            tracker.update(db, 'mx-example', lambda run: dict(good, tasks=[task], pr=12, currentTask=1, ledgerMtime=3.0))
+            self.assertIsNotNone(tracker.load(db, 'mx-example'))
+            for run in spoiled:
+                db.execute("UPDATE pipeline_runs SET run=? WHERE stream='mx-example'", (json.dumps(run),))
+                db.commit()
+                self.assertIsNone(tracker.load(db, 'mx-example'), run)
+        self.post('mx-example', 'Skill', {'skill': 'superpowers:brainstorming'})
+        run = self.run_state()
+        self.assertEqual((run['name'], run['phases']['brainstorm']['status']), ('superpowers', 'running'))
+
+    def test_oversized_numbers_in_files_never_reach_the_list(self):
+        plan = self.folder / 'docs/superpowers/plans/2026-11-10-big.md'
+        plan.parent.mkdir(parents=True)
+        plan.write_text('# Big\n### Task 1: One\n### Task 123456789012345678901234567890: Huge\n')
+        workspace = self.folder / '.superpowers/sdd/2026-11-10-big'
+        workspace.mkdir(parents=True)
+        (workspace / 'plan-path').write_text('docs/superpowers/plans/2026-11-10-big.md\n')
+        (workspace / 'progress.md').write_text('Task 1: fix round 99999999999999999999\nTask 99999999999999999999: complete\n')
+        row = streams.streams()[0]
+        tasks = next(p for p in row['pipeline']['phases'] if p['id'] == 'execute')['tasks']
+        self.assertEqual([(t['n'], t['round']) for t in tasks], [(1, None)])
+
+    def test_a_completed_workstream_ignores_events_until_it_is_reopened(self):
+        import codex_session
+        self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
+        threads = {'root': [None, 'idle', 't1', '']}
+        cache = {}
+        with streams.database() as db:
+            previous = codex_session.observe(self.codex(threads), db, 'term-extra', None, cache)
+        self.parent['status'] = 'closed'
+        self.assertTrue(streams.streams()[0]['pipeline']['frozen'])
+        before = self.run_state()
+        spec = self.folder / 'docs/superpowers/specs/2026-11-10-new-design.md'
+        spec.parent.mkdir(parents=True)
+        spec.write_text('# New\n')
+        workspace = self.folder / '.superpowers/sdd/2026-11-10-demo'
+        workspace.mkdir(parents=True)
+        self.post('term-extra', 'Skill', {'skill': 'superpowers:brainstorming'})
+        self.post('mx-example', 'Write', {'file_path': str(spec)}, {'type': 'create', 'filePath': str(spec)})
+        self.post('term-extra', 'Bash', {'command': 'bash x/sdd-workspace p.md'}, {'stdout': str(workspace) + '\n'})
+        self.post('mx-example', 'mcp__plugin_github_github__create_pull_request', {'owner': 'o'},
+                  'https://github.com/o/r/pull/13')
+        threads['root'][2:] = ['t2', 'https://github.com/o/r/pull/7']
+        with streams.database() as db:
+            previous = codex_session.observe(self.codex(threads), db, 'term-extra', previous, cache)
+            self.assertEqual(db.execute('SELECT count(*) FROM pipeline_docs').fetchone()[0], 0)
+        self.assertEqual(self.run_state(), before)
+        self.parent['status'] = 'open'
+        streams.streams()
+        with streams.database() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM pipeline_closed').fetchone()[0], 0)
+        self.post('term-extra', 'Skill', {'skill': 'superpowers:writing-plans'})
+        self.assertEqual(self.run_state()['phases']['plan']['status'], 'running')
+
+    def test_a_skill_without_a_run_takes_no_write_lock_unless_it_starts_one(self):
+        with streams.database() as db, patch.object(tracker, 'update', side_effect=AssertionError('write lock taken')):
+            statements = []
+            db.set_trace_callback(statements.append)
+            tracker.tool_event(db, 'mx-example', 'Skill', {'skill': 'superpowers:verification-before-completion'}, '', 1.0)
+            tracker.tool_event(db, 'mx-example', 'Skill', {'skill': 'commit-commands:commit'}, '', 1.0)
+            db.set_trace_callback(None)
+            self.assertFalse(db.in_transaction)
+        self.assertEqual([s for s in statements if not s.lstrip().upper().startswith('SELECT')], [])
+        self.post('mx-example', 'Skill', {'skill': 'brainstorming'})
+        self.assertEqual(self.run_state()['phases']['brainstorm']['status'], 'running')
+
+    def test_a_plain_command_in_a_live_run_takes_no_write_lock(self):
+        self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
+        with streams.database() as db, patch.object(tracker, 'update', side_effect=AssertionError('write lock taken')):
+            statements = []
+            db.set_trace_callback(statements.append)
+            tracker.tool_event(db, 'mx-example', 'Bash', {'command': 'ls'}, {'stdout': 'a\n'}, 1.0)
+            tracker.command_event(db, 'term-extra', 'git status', '', 1.0)
+            db.set_trace_callback(None)
+            self.assertFalse(db.in_transaction)
+        self.assertEqual([s for s in statements if not s.lstrip().upper().startswith('SELECT')], [])
+
+    def test_a_symlink_to_a_file_that_is_not_markdown_is_not_a_document(self):
+        target = self.folder / 'script.sh'
+        target.write_text('# not markdown\n')
+        link = self.folder / 'docs/superpowers/specs/2026-11-10-trap-design.md'
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
+        self.post('mx-example', 'Write', {'file_path': str(link)}, {'type': 'create', 'filePath': str(link)})
+        self.assertIsNone(self.run_state())
+        self.assertEqual(streams.streams()[0]['documents'], [])
+        with streams.database() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM pipeline_docs').fetchone()[0], 0)
+
     def test_edit_or_overwrite_lists_a_document_but_never_starts_a_run(self):
         self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
         before = self.run_state()['launchedAt']
@@ -267,6 +368,23 @@ class TrackerTests(unittest.TestCase):
         with streams.database() as db:
             tracker.update(db, 'mx-example', lambda run: pipeline.complete_phase(run, 'merge', 6.0))
             tracker.poll_pull_requests(db, ['mx-example'], 7.0, view=lambda url: self.fail('polled a finished run'))
+
+    def test_one_failing_workstream_does_not_stop_the_poll(self):
+        self.at_ci()
+        with streams.database() as db:
+            tracker.update(db, 'mx-other', lambda run: pipeline.pull_request_created(
+                pipeline.advance_to(pipeline.new_run(1.0), 'pr', 1.0), 'https://github.com/o/r/pull/5', 1.0))
+        def view(url):
+            if url.endswith('/12'):
+                raise RuntimeError('boom')
+            return {'state': 'MERGED'}
+        with patch.object(tracker, 'guarded', self.real_guarded), patch.object(tracker.trace, 'error') as error:
+            with streams.database() as db:
+                tracker.poll_pull_requests(db, ['mx-example', 'mx-other'], 5.0, view=view)
+                self.assertFalse(db.in_transaction)
+                self.assertEqual(tracker.load(db, 'mx-other')['phases']['merge']['status'], 'done')
+        error.assert_called_once_with('pipeline failed type=RuntimeError in=poll_pull_request')
+        self.assertEqual(self.run_state()['phases']['merge']['status'], 'todo')
 
     def test_pr_view_survives_a_missing_gh(self):
         with patch.object(tracker.subprocess, 'run', side_effect=FileNotFoundError):
@@ -484,6 +602,23 @@ class SnapshotTests(unittest.TestCase):
         first = self.snap()
         self.assertEqual(len(next(p for p in first[0]['phases'] if p['id'] == 'execute')['tasks']), 2)
         self.assertEqual(self.snap(reads_only=True), first)
+
+    def test_an_unchanged_refresh_of_a_completed_workstream_writes_nothing(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        self.snap()
+        first = self.snap(closed=True)
+        self.assertTrue(first[0]['frozen'])
+        self.assertEqual(self.snap(closed=True, reads_only=True), first)
+        self.snap()
+        self.assertEqual(self.snap(reads_only=True)[1], first[1])
+
+    def test_a_run_that_cannot_be_rendered_keeps_its_documents(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        with patch.object(tracker.pipeline, 'render', side_effect=KeyError('tasks')), \
+                patch.object(tracker.trace, 'error') as error:
+            view, documents = self.snap()
+        error.assert_called_once_with('pipeline failed type=KeyError in=render')
+        self.assertEqual((view, [d['title'] for d in documents]), (None, ['A']))
 
     def test_timestamp(self):
         self.assertEqual(tracker.timestamp('2026-11-10T05:41:25Z'), 1794289285.0)

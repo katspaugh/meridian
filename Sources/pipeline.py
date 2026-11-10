@@ -53,7 +53,27 @@ REVIEW_PACKAGE = re.compile(r"\breview-package\b")
 PR_CREATE = re.compile(r"\bgh\s+pr\s+create\b")
 PR_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
 PR_MERGE_AUTO = re.compile(r"--auto\b")
-PR_MERGE_NUMBER = re.compile(r"\bgh\s+pr\s+merge\s+#?(\d+)")
+PR_MERGE_NUMBER = re.compile(r"\bgh\s+pr\s+merge\s+(?:#?|[\"']?https?://github\.com/[\w.-]+/[\w.-]+/pull/)(\d+)")
+TASK_BRIEF_NAME = re.compile(r"\btask-brief\b")
+# Any command that one of the run's command rules can act on.
+RUN_COMMANDS = (SDD_WORKSPACE, TASK_BRIEF_NAME, REVIEW_PACKAGE, PR_CREATE, PR_MERGE)
+
+# Bigger numbers are ignored wherever one is parsed: the app reads them as
+# Swift Ints, and no plan has that many tasks or fix rounds.
+MAX_NUMBER = 9999
+
+
+def _number(digits, least=1):
+    """The digits as an int from least to MAX_NUMBER, or None."""
+    # Checked before int(), so a line of thousands of digits costs nothing.
+    if len(digits.lstrip("0")) > len(str(MAX_NUMBER)):
+        return None
+    n = int(digits)
+    return n if least <= n <= MAX_NUMBER else None
+
+
+def may_change_run(command):
+    return any(pattern.search(command) for pattern in RUN_COMMANDS)
 
 
 def new_run(now):
@@ -140,8 +160,8 @@ def parse_plan_tasks(text):
         match = TASK_HEADING.match(line)
         if not match:
             continue
-        n = int(match.group(1))
-        if n in seen:
+        n = _number(match.group(1))
+        if n is None or n in seen:
             continue
         seen.add(n)
         title = re.sub(r"[*_`]", "", match.group(2)).strip()
@@ -207,8 +227,12 @@ def review_task(run, now):
 
 
 def apply_ledger(run, text, now):
-    complete = {int(match.group(1)) for match in LEDGER_COMPLETE.finditer(text)}
-    rounds = {int(match.group(1)): int(match.group(2)) for match in LEDGER_ROUND.finditer(text)}
+    complete = {_number(match.group(1)) for match in LEDGER_COMPLETE.finditer(text)} - {None}
+    rounds = {}
+    for match in LEDGER_ROUND.finditer(text):
+        n, fix_round = _number(match.group(1)), _number(match.group(2), least=0)
+        if n is not None and fix_round is not None:
+            rounds[n] = fix_round
 
     known = {task["n"] for task in run["tasks"]}
     for n in sorted((complete | set(rounds)) - known):
@@ -229,6 +253,10 @@ def apply_ledger(run, text, now):
 
 def _is_live(run):
     return run is not None and not is_finished(run)
+
+
+def is_starter(skill):
+    return re.sub(r"^superpowers:", "", skill) in STARTERS
 
 
 def skill_event(run, skill, now):
@@ -301,7 +329,8 @@ def command_event(run, command, output, now):
         return run
     brief = TASK_BRIEF.search(command)
     if brief:
-        return start_task(run, int(brief.group(1)), now)
+        n = _number(brief.group(1))
+        return start_task(run, n, now) if n is not None else run
     if REVIEW_PACKAGE.search(command):
         return review_task(run, now)
     if PR_CREATE.search(command):
@@ -547,7 +576,9 @@ def render(run, now, waiting=False, active_agents=0, frozen=False):
                 item["tasks"].append({
                     "n": task["n"], "title": task["title"], "mark": task_slot["view"],
                     "implement": task_slot["implement"], "review": task_slot["review"],
-                    "round": task.get("round"), "time": task_time, "estimate": task_estimate,
+                    # A round is shown only while the task is in a fix loop.
+                    "round": task.get("round") if task_slot["review"] != "done" else None,
+                    "time": task_time, "estimate": task_estimate,
                 })
         phases.append(item)
 

@@ -69,6 +69,18 @@ class RunModelTests(unittest.TestCase):
         pipeline.apply_ledger(run, 'Task 1: complete\nTask 2: complete\nTask 3: complete\n', T0 + 40 * MIN)
         self.assertEqual(run['phases']['execute']['status'], 'done')
 
+    def test_task_numbers_and_rounds_past_9999_are_ignored(self):
+        huge = '123456789012345678901234567890'
+        self.assertEqual(pipeline.parse_plan_tasks('### Task 0: Zero\n### Task 9999: Last\n### Task {}: Big\n### Task 10000: Over'.format(huge)),
+                         [{'n': 9999, 'title': 'Last'}])
+        run = pipeline.advance_to(planned(), 'execute', T0)
+        pipeline.apply_ledger(run, 'Task 1: fix round 99999999999999999999\nTask 2: fix round 9999\n'
+                                   'Task {}: complete\nTask 10000: fix round 1\n'.format(huge), T0 + MIN)
+        self.assertEqual([(task['n'], task.get('round')) for task in run['tasks']], [(1, None), (2, 9999), (3, None)])
+        pipeline.command_event(run, 'task-brief p.md 99999999999999999999999', '', T0 + 2 * MIN)
+        pipeline.command_event(run, 'task-brief p.md 10000', '', T0 + 2 * MIN)
+        self.assertEqual(([task['n'] for task in run['tasks']], run.get('currentTask')), ([1, 2, 3], None))
+
     def test_task_completed_unseen_keeps_no_start_time(self):
         run = pipeline.apply_ledger(pipeline.advance_to(planned(), 'execute', T0), 'Task 2: complete', T0 + 9 * MIN)
         self.assertEqual(run['tasks'][1]['implement'], {'status': 'done', 'endedAt': T0 + 9 * MIN})
@@ -150,6 +162,21 @@ class EventRuleTests(unittest.TestCase):
         pipeline.command_event(run, 'gh pr merge 12 --squash', '', T0 + 3 * MIN)
         self.assertTrue(pipeline.is_finished(run))
         self.assertIsNone(pipeline.command_event(None, 'gh pr create', 'https://github.com/o/r/pull/1', T0))
+
+    def test_merging_a_pull_request_by_url_compares_its_number(self):
+        run = pipeline.advance_to(planned(), 'pr', T0)
+        pipeline.command_event(run, 'gh pr create --fill', 'https://github.com/o/r/pull/12\n', T0 + MIN)
+        pipeline.command_event(run, 'gh pr merge https://github.com/o/r/pull/99 --squash', '', T0 + 2 * MIN)
+        self.assertFalse(pipeline.is_finished(run))
+        pipeline.command_event(run, 'gh pr merge "https://github.com/o/r/pull/12" --squash', '', T0 + 3 * MIN)
+        self.assertTrue(pipeline.is_finished(run))
+
+    def test_commands_that_can_change_a_run(self):
+        for command in ('bash x/sdd-workspace p.md', 'bash "/a b/task-brief" p.md 1', 'x/review-package p.md a b',
+                        'gh pr create --fill', 'gh pr merge 12'):
+            self.assertTrue(pipeline.may_change_run(command), command)
+        for command in ('ls', 'git status', 'gh pr view 12', 'echo task'):
+            self.assertFalse(pipeline.may_change_run(command), command)
 
     def test_pending_checks_keep_ci_running_with_a_count(self):
         run = pipeline.apply_pr_view(
@@ -257,6 +284,13 @@ class ScheduleTests(unittest.TestCase):
         brainstorming = pipeline.advance_to(pipeline.new_run(T0), 'brainstorm', T0)
         idea = pipeline.render(brainstorming, T0 + MIN, frozen=True)['phases'][0]
         self.assertEqual((idea['mark'], idea['time'], idea['estimate']), ('todo', None, False))
+
+    def test_render_shows_a_fix_round_only_until_the_review_is_done(self):
+        run = pipeline.start_task(planned(), 1, T0 + 10 * MIN)
+        pipeline.apply_ledger(run, 'Task 1: fix round 2\nTask 2: fix round 1\n', T0 + 20 * MIN)
+        pipeline.apply_ledger(run, 'Task 1: fix round 2\nTask 1: complete\nTask 2: fix round 1\n', T0 + 30 * MIN)
+        tasks = next(p for p in pipeline.render(run, T0 + 31 * MIN)['phases'] if p['id'] == 'execute')['tasks']
+        self.assertEqual([(t['n'], t['round']) for t in tasks], [(1, None), (2, 1), (3, None)])
 
     def test_render_keeps_its_contract_and_leaves_the_run_alone(self):
         view_keys = {'name', 'startedAt', 'finishAt', 'finished', 'needsYou', 'polling', 'frozen', 'activeAgents', 'phases'}
