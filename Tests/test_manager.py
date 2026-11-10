@@ -28,6 +28,7 @@ class Bridge:
             db.execute("CREATE TABLE activity (id TEXT PRIMARY KEY, session TEXT, state TEXT, detail TEXT, transcript TEXT)")
             db.execute("INSERT INTO activity VALUES ('t1','s','Review','Claude finished its turn.',NULL)")
             store.initialize(db)
+            store.set_setting(db, "paused", "0")
         db.close()
 
     def database(self):
@@ -125,7 +126,14 @@ class ManagerReviewTests(Fixture):
         self.assertEqual(manager.review(self.bridge, "t1", "s", retry).output["hookSpecificOutput"]["permissionDecision"], "allow")
         other = self.event("PreToolUse", tool_name="Bash", tool_input={"command": "make clean"})
         self.assertEqual(manager.review(self.bridge, "t1", "s", other), manager.NOTHING)
+        ran = self.event("PostToolUse", tool_name="Bash", tool_input={"command": "make dist"})
+        self.assertEqual(manager.review(self.bridge, "t1", "s", ran), manager.NOTHING)
         self.consult.assert_not_called()
+        self.assertEqual([e[1:] for e in self.events()[1:]], [
+            ("retry-allowed", "Let the approved retry of Bash through before auto mode's check.", '{"message": ""}'),
+            ("ran", "The approved Bash action ran.", '{"message": ""}')])
+        self.assertEqual(self.query("SELECT stream, terminal, trigger, verdict FROM manager_events ORDER BY id"),
+                         [("t1", "t1", "denied", v) for v in ("approve", "retry-allowed", "ran")])
 
     def test_denied_approve_sets_working_and_retry_output_is_exact(self):
         self.consult.return_value = {"verdict": "approve", "summary": "Needed for the build.", "message": ""}
@@ -145,6 +153,8 @@ class ManagerReviewTests(Fixture):
         outcome = manager.review(self.bridge, "t1", "s", request)
         self.assertEqual(outcome, manager.Outcome(ALLOW_PERMISSION, "Working", "Approved by the workstream manager."))
         self.consult.assert_not_called()
+        self.assertEqual(self.events(), [("denied", "prompt-allowed",
+                                          "Answered the permission prompt for the approved Bash action.", '{"message": ""}')])
 
     def test_denied_uphold_gives_no_output_but_records_the_event(self):
         self.consult.return_value = {"verdict": "uphold", "summary": "Out of scope.", "message": ""}
@@ -409,6 +419,9 @@ class ManagerReviewTests(Fixture):
         self.assertEqual(manager.review(self.bridge, "t1", "s", denied).output,
                          {"hookSpecificOutput": {"hookEventName": "PermissionDenied", "retry": True}})
         self.consult.assert_not_called()
+        self.assertEqual(self.events(), [("denied", "blocked-again",
+                                          "Auto mode blocked the approved Bash action again; told Claude it may retry.",
+                                          '{"message": ""}')])
 
     def test_permission_request_for_reviewed_tools_is_left_to_pre_tool_use(self):
         for tool in ("AskUserQuestion", "ExitPlanMode"):
@@ -507,6 +520,15 @@ class ManagerReviewTests(Fixture):
         self.assertEqual(manager.review(self.bridge, "t1", "s", failed), manager.NOTHING)
         retry = self.event("PreToolUse", tool_name="Bash", tool_input={"command": "make dist"})
         self.assertEqual(manager.review(self.bridge, "t1", "s", retry), manager.NOTHING)
+        self.assertEqual(self.events(), [("denied", "failed", "The approved Bash action ran and failed.",
+                                          '{"message": ""}')])
+
+    def test_a_plain_tool_call_records_no_event(self):
+        for name in ("PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure"):
+            event = self.event(name, tool_name="Bash", tool_input={"command": "ls"})
+            self.assertEqual(manager.review(self.bridge, "t1", "s", event), manager.NOTHING)
+        self.assertEqual(self.events(), [])
+        self.consult.assert_not_called()
 
     def test_hook_consults_are_traced(self):
         order = []

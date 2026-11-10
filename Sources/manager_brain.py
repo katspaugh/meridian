@@ -14,8 +14,8 @@ INVESTIGATE_TOOLS = ["WebFetch", "WebSearch", "Bash"]
 INVESTIGATE_RULES = [f"Bash({command} *)" for command in (
     "gh pr view", "gh pr list", "gh pr checks", "gh issue view", "gh run view", "gh run list",
     "bd show", "bd list", "bd ready", "bd children")]
-# --output writes a file; --web opens the boss's browser.
-INVESTIGATE_DENIED = ["Bash(*--output*)", "Bash(*--web*)"]
+# --output writes a file; --web and -w open the boss's browser.
+INVESTIGATE_DENIED = ["Bash(*--output*)", "Bash(*--web*)", "Bash(* -w)", "Bash(* -w *)"]
 VERDICTS = {"permission": ["allow", "deny", "ask"], "denied": ["approve", "uphold", "ask"],
             "question": ["answer", "ask"], "plan": ["approve", "revise", "ask"],
             "stop": ["stop", "continue", "ask"]}

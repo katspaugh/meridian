@@ -31,7 +31,8 @@ class ManagerStoreTests(unittest.TestCase):
         store.approve(self.db, "t1", "Bash", {"command": "npm test"}, now=0)
         store.approve(self.db, "t1", "Bash", {"command": "make"}, now=0)
         store.approve(self.db, "t2", "Bash", {"command": "npm test"}, now=0)
-        store.revoke(self.db, "t1", "Bash", {"command": "npm test"})
+        self.assertIs(store.revoke(self.db, "t1", "Bash", {"command": "npm test"}), True)
+        self.assertIs(store.revoke(self.db, "t1", "Bash", {"command": "npm test"}), False)
         self.assertFalse(store.approved(self.db, "t1", "Bash", {"command": "npm test"}, now=1))
         self.assertTrue(store.approved(self.db, "t1", "Bash", {"command": "make"}, now=1))
         self.assertTrue(store.approved(self.db, "t2", "Bash", {"command": "npm test"}, now=1))
@@ -88,7 +89,7 @@ class ManagerStoreTests(unittest.TestCase):
                            {"message": "Take mx-1.2 next.", "decisions": [{"decision": "Use tabs", "why": "Matches the app", "undo": "Swap the component"}]})
         store.add_chat(self.db, "user", "What is left?")
         state = store.state(self.db)
-        self.assertEqual(state["paused"], False)
+        self.assertEqual(state["paused"], True)
         self.assertEqual(state["unseen"], 1)
         self.assertEqual(state["events"][0]["message"], "Take mx-1.2 next.")
         self.assertEqual(state["events"][0]["decisions"][0]["undo"], "Swap the component")
@@ -132,7 +133,8 @@ class ManagerStoreTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in store.state(self.db)["asks"]], [latest])
 
     def test_paused_follows_setting(self):
-        self.assertFalse(store.paused(self.db))
+        self.assertTrue(store.paused(self.db))
+        self.assertTrue(store.state(self.db)["paused"])
         store.set_setting(self.db, "paused", "1")
         self.assertTrue(store.paused(self.db))
         self.assertTrue(store.state(self.db)["paused"])

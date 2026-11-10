@@ -102,6 +102,10 @@ struct ManagerView: View {
             VSplitView {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
+                        if state?.paused == true {
+                            Text("The manager is paused. It is not reviewing or nudging anything. Turn off Paused to start it.")
+                                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                         briefing
                         if let asks = state?.asks, !asks.isEmpty { needsYou(asks) }
                         activity

@@ -320,6 +320,7 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.review.side_effect = REVIEW
         call = dict(tool_name="Bash", tool_input={"command": "make"})
         with streams.database() as db:
+            streams.manager_store.set_setting(db, "paused", "0")
             streams.manager_store.approve(db, key, "Bash", call["tool_input"])
         with patch.object(streams.manager.brain, "consult", return_value=None) as consult:
             out = self.run_hook(key, "sid", hook_event_name="PreToolUse", **call)
@@ -333,6 +334,10 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.assertIn("Folder, title, links and tasks", consult.call_args.args[2])
         self.assertEqual(consult.call_args.kwargs["folders"], [str(self.folder)])
         self.assertEqual(self.activity(key), ("Review", "Done?"))
+        with streams.database() as db:
+            events = db.execute("SELECT stream, terminal, trigger, verdict FROM manager_events ORDER BY id").fetchall()
+        self.assertEqual(events, [(self.parent["id"], key, "denied", "retry-allowed"),
+                                  (self.parent["id"], key, "denied", "ran")])
 
     def test_settings_register_the_manager_hooks(self):
         hooks = json.loads(streams.settings("k", "s"))["hooks"]

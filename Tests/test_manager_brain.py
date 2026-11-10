@@ -119,7 +119,7 @@ class ManagerBrainTests(unittest.TestCase):
         # Git runs programs named in a repository's own config, and agents own those repositories.
         self.assertFalse([r for r in rules if "git" in r.split("(")[-1].split()[0]])
         start = args.index("--disallowedTools") + 1
-        self.assertEqual(args[start:start + 2], ["Bash(*--output*)", "Bash(*--web*)"])
+        self.assertEqual(args[start:start + 4], ["Bash(*--output*)", "Bash(*--web*)", "Bash(* -w)", "Bash(* -w *)"])
 
     def test_config_override(self):
         (self.root / "manager").mkdir()

@@ -62,6 +62,12 @@ NUDGE_CAP = ("The manager nudged this agent three times and it is waiting again.
 # Only an idle agent: a dialog can be on screen while the state still says Working, and Enter would accept it.
 TELLABLE = ("Review", "Ready")
 SWEEP_INTERVAL = 120
+# What follows an approved block, so the log shows whether the hook's approval got the action through.
+AFTER_APPROVAL = {"retry-allowed": "Let the approved retry of {tool} through before auto mode's check.",
+                  "prompt-allowed": "Answered the permission prompt for the approved {tool} action.",
+                  "blocked-again": "Auto mode blocked the approved {tool} action again; told Claude it may retry.",
+                  "ran": "The approved {tool} action ran.",
+                  "failed": "The approved {tool} action ran and failed."}
 
 
 @contextlib.contextmanager
@@ -82,6 +88,10 @@ def permission(decision):
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
 
 
+def after_approval(db, stream, key, verdict, tool):
+    store.record_event(db, stream, key, "denied", verdict, AFTER_APPROVAL[verdict].format(tool=tool), {"message": ""})
+
+
 def review(bridge, key, sid, event):
     name = event.get("hook_event_name")
     if name == "UserPromptSubmit":
@@ -93,7 +103,9 @@ def review(bridge, key, sid, event):
     if name in ("PostToolUse", "PostToolUseFailure"):
         # Approvals are one-off: once the approved action has run, it needs a fresh review.
         with transaction(bridge) as db:
-            store.revoke(db, key, tool, tool_input)
+            if store.revoke(db, key, tool, tool_input):
+                after_approval(db, bridge.terminal_owner(key), key,
+                               "ran" if name == "PostToolUse" else "failed", tool)
             if not subagent:
                 store.resolve_asks(db, terminal=key)  # The agent has moved on.
         return NOTHING
@@ -101,6 +113,8 @@ def review(bridge, key, sid, event):
     if name == "PreToolUse" and trigger is None:
         with transaction(bridge) as db:
             allowed = not store.paused(db) and store.approved(db, key, tool, tool_input)
+            if allowed:
+                after_approval(db, bridge.terminal_owner(key), key, "retry-allowed", tool)
         return Outcome(pre_tool("allow", permissionDecisionReason=APPROVED), None, None) if allowed else NOTHING
     # Claude Code reports subagent turns as SubagentStop; a subagent Stop is never reviewed.
     # Questions and plans are reviewed at PreToolUse, so their permission prompts are left alone.
@@ -111,8 +125,10 @@ def review(bridge, key, sid, event):
         if store.paused(db):
             return NOTHING
         if trigger == "permission" and store.approved(db, key, tool, tool_input):
+            after_approval(db, stream, key, "prompt-allowed", tool)
             return status(Outcome(permission({"behavior": "allow"}), "Working", APPROVED), subagent)
         if trigger == "denied" and store.approved(db, key, tool, tool_input):
+            after_approval(db, stream, key, "blocked-again", tool)
             return Outcome(RETRY, None, None)
         # The boss chose to have the manager review permission prompts only in auto mode.
         if trigger == "permission" and event.get("permission_mode") != "auto":

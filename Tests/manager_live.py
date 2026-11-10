@@ -38,6 +38,7 @@ class Bridge:
             db.execute("CREATE TABLE activity (id TEXT PRIMARY KEY, session TEXT, state TEXT, detail TEXT, transcript TEXT)")
             db.execute("INSERT INTO activity VALUES (?,?,'Working','Claude is working.',NULL)", (TERMINAL, SESSION))
             store.initialize(db)
+            store.set_setting(db, "paused", "0")  # A fresh manager starts paused.
         db.close()
 
     def database(self):

@@ -38,7 +38,8 @@ def set_setting(db, key, value):
 
 
 def paused(db):
-    return setting(db, "paused") == "1"
+    # A fresh manager does nothing until the boss switches it on once.
+    return setting(db, "paused") != "0"
 
 
 def record_event(db, stream, terminal, trigger, verdict, summary, detail=None, now=None):
@@ -86,8 +87,8 @@ def approved(db, terminal, tool_name, tool_input, now=None):
 
 
 def revoke(db, terminal, tool_name, tool_input):
-    db.execute("DELETE FROM manager_approvals WHERE terminal=? AND fingerprint=?",
-               (terminal, fingerprint(tool_name, tool_input)))
+    return db.execute("DELETE FROM manager_approvals WHERE terminal=? AND fingerprint=?",
+                      (terminal, fingerprint(tool_name, tool_input))).rowcount > 0
 
 
 def allow_consult(db, terminal, now=None):

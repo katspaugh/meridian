@@ -312,6 +312,20 @@ class SignatureTests(Fixture):
         self.assertIs(state["paused"], True)
         self.assertIs(state["sweepDue"], False)
 
+    def test_a_fresh_manager_starts_paused(self):
+        with self.db() as db:
+            db.execute("DELETE FROM manager_settings WHERE key='paused'")
+        self.consult.return_value = {"verdict": "continue", "summary": "Sent it on.", "message": "Go on."}
+        self.assertEqual(manager.review(self.bridge, "t1", "s", dict(hook_event_name="Stop", session_id="s")),
+                         manager.NOTHING)
+        self.consult.assert_not_called()
+        self.rows = [self.stream(terminals=[self.terminal("c1", "codex", "Review")])]
+        state = manager.state(self.bridge)
+        self.assertEqual((state["paused"], state["sweepDue"]), (True, False))
+        with self.db() as db:
+            store.set_setting(db, "paused", "0")
+        self.assertIs(manager.state(self.bridge)["sweepDue"], True)
+
     def test_state_takes_one_snapshot_under_the_lock(self):
         self.assertIs(manager.state(self.bridge)["briefingStale"], True)
         self.assertEqual(self.bridge.locked_during_streams, [True])
@@ -686,6 +700,8 @@ class BridgeActionTests(unittest.TestCase):
         return json.loads(self.main("manager-state"))
 
     def test_pause_shows_in_state(self):
+        self.assertIs(self.state()["paused"], True)
+        self.main("manager-pause", "0")
         self.assertIs(self.state()["paused"], False)
         self.main("manager-pause", "1")
         state = self.state()
