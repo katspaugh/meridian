@@ -138,7 +138,15 @@ enum Bridge {
     @Published var busy = false
     @Published var error = ""
     @Published var loadError = ""
+    @Published var pulls = [String: PullRequest]()
     private var refreshID = 0
+    /// Merged pull requests no longer change, so only the others are looked up again.
+    func refreshPulls(_ urls: [URL]) async {
+        let pending = urls.map(\.absoluteString).filter { pulls[$0]?.state != "MERGED" }
+        guard !pending.isEmpty, let data = try? await Bridge.run(["pulls"] + pending),
+              let found = try? JSONDecoder().decode([String: PullRequest].self, from: data) else { return }
+        pulls.merge(found) { _, new in new }
+    }
     func refresh(traced: Bool = false) async {
         refreshID += 1
         let id = refreshID
@@ -279,6 +287,7 @@ struct Dashboard: View {
     @State private var appearance: String?
     @AppStorage("inspectorVisible") private var inspectorVisible = true
     @AppStorage("lastWorkstreamFolder") private var lastFolder = ""
+    @AppStorage("recentWorkstreamFolders") private var recentFoldersJSON = "[]"
 
     private var selected: Stream? { store.rows.first { $0.id == selection } }
     private var selectedTerminalID: String? { selected.flatMap(selectedTerminal)?.id }
@@ -292,9 +301,18 @@ struct Dashboard: View {
         choices[stream.id] = terminalID
         if let data = try? JSONEncoder().encode(choices) { terminalSelections = String(decoding: data, as: UTF8.self) }
     }
-    private var suggestedFolder: String {
-        ([lastFolder] + store.rows.sorted { $0.created > $1.created }.map { $0.sourceFolder ?? $0.folder })
-            .first { FileManager.default.fileExists(atPath: $0) } ?? ""
+    private var recentFolders: [String] {
+        let saved = (try? JSONDecoder().decode([String].self, from: Data(recentFoldersJSON.utf8))) ?? []
+        let candidates = [lastFolder] + saved + store.rows.sorted { $0.created > $1.created }.map { $0.sourceFolder ?? $0.folder }
+        var seen = Set<String>()
+        return Array(candidates.compactMap { candidate -> String? in
+            guard !candidate.isEmpty else { return nil }
+            let path = URL(fileURLWithPath: (candidate as NSString).expandingTildeInPath).standardizedFileURL.path
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                  isDirectory.boolValue, seen.insert(path).inserted else { return nil }
+            return path
+        }.prefix(8))
     }
 
     private func sidebarRow(_ stream: Stream) -> some View {
@@ -314,7 +332,19 @@ struct Dashboard: View {
                 ZStack(alignment: .leading) {
                     ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
                         AgentIcon(provider: provider)
-                            .background(.background, in: Circle())
+                            .mask {
+                                Rectangle()
+                                    .overlay {
+                                        if index > 0 {
+                                            // Clear the area behind the preceding icon without
+                                            // painting over the sidebar or selection background.
+                                            Circle()
+                                                .offset(x: 6)
+                                                .blendMode(.destinationOut)
+                                        }
+                                    }
+                                    .compositingGroup()
+                            }
                             .offset(x: -CGFloat(index) * 6)
                             .zIndex(-Double(index))
                     }
@@ -534,15 +564,17 @@ struct Dashboard: View {
                                 inspector(stream).id(stream.id).frame(minWidth: 218, idealWidth: 285, maxWidth: 410)
                             }
                         }
-                        if !stream.links.isEmpty {
+                        // Pull requests are listed under Changes in the inspector.
+                        let issues = stream.links.filter { $0.kind != "pr" }
+                        if !issues.isEmpty {
                             Divider()
                             ScrollView(.horizontal) {
                                 HStack(spacing: 14) {
-                                    ForEach(stream.links) { item in
+                                    ForEach(issues) { item in
                                         Link(destination: item.url) {
-                                            Label(item.label, systemImage: item.kind == "pr" ? "arrow.triangle.pull" : "circle.hexagongrid")
+                                            Label(item.label, systemImage: "circle.hexagongrid")
                                         }
-                                        .accessibilityLabel((item.kind == "pr" ? "Pull request " : "Linear issue ") + item.label)
+                                        .accessibilityLabel("Linear issue " + item.label)
                                         .help(item.url.absoluteString)
                                     }
                                 }.font(.callout).padding(.horizontal, 12).padding(.vertical, 7)
@@ -587,8 +619,11 @@ struct Dashboard: View {
             }
         }
         .sheet(isPresented: $adding) {
-            NewStream(store: store, folder: suggestedFolder) { id, folder in
+            NewStream(store: store, folder: recentFolders.first ?? "", recentFolders: recentFolders) { id, folder in
                 lastFolder = folder
+                if let data = try? JSONEncoder().encode(recentFolders) {
+                    recentFoldersJSON = String(decoding: data, as: UTF8.self)
+                }
                 pane = .workstream
                 selection = id
                 agentSelection = nil
@@ -627,7 +662,8 @@ struct Dashboard: View {
 
     private func inspector(_ stream: Stream) -> some View {
         WorkstreamInspector(stream: stream, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
-                            terminal: selectedTerminal(stream), busy: store.busy) { keepTasksOpen in
+                            terminal: selectedTerminal(stream), busy: store.busy,
+                            pulls: store.pulls, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
@@ -670,6 +706,7 @@ struct NewStream: View {
     @ObservedObject var store: Store
     @Environment(\.dismiss) var dismiss
     @State var folder: String
+    var recentFolders: [String]
     var created: (String, String) -> Void
     @State private var reference = ""
     @AppStorage("newStreamProvider") private var provider = "claude"
@@ -688,6 +725,41 @@ struct NewStream: View {
                     panel.canChooseDirectories = true
                     panel.canChooseFiles = false
                     if panel.runModal() == .OK { folder = panel.url?.path ?? "" }
+                }
+            }
+            if !recentFolders.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recent folders").font(.caption).foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(recentFolders, id: \.self) { path in
+                                Button {
+                                    folder = path
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "folder").foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(URL(fileURLWithPath: path).lastPathComponent)
+                                                .font(.callout).lineLimit(1)
+                                            Text((path as NSString).abbreviatingWithTildeInPath)
+                                                .font(.caption).foregroundStyle(.secondary)
+                                                .lineLimit(1).truncationMode(.middle)
+                                        }
+                                        Spacer(minLength: 0)
+                                        if folder == path {
+                                            Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                                        }
+                                    }
+                                    .padding(6).contentShape(Rectangle())
+                                    .background(folder == path ? Color.accentColor.opacity(0.1) : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 6))
+                                }
+                                .buttonStyle(.plain).help(path)
+                                .accessibilityLabel("Use folder \(path)")
+                            }
+                        }
+                    }
+                    .frame(height: CGFloat(min(recentFolders.count, 4)) * 48)
                 }
             }
             Text("Git repositories get a new branch and worktree shared by all terminals. Other folders are used directly.")

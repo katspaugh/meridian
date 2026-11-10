@@ -3,6 +3,7 @@ import json
 import re
 import shlex
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 PR = re.compile(r'https?://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)\b', re.I)
@@ -10,6 +11,7 @@ LINEAR = re.compile(r'https?://linear\.app/(?:(?P<team>[\w-]+)/)?issue/(?P<id>[a
 ISSUE = re.compile(r'\b[A-Z][A-Z0-9]{0,15}-[1-9]\d*\b')
 REPO = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
 MUTATIONS = {'create', 'edit', 'merge', 'close', 'reopen', 'ready', 'review', 'comment'}
+PASSED = {'SUCCESS', 'NEUTRAL', 'SKIPPED'}
 
 
 def initialize(db):
@@ -42,9 +44,9 @@ def output_text(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def command_output(args, cwd):
+def command_output(args, cwd, timeout=4):
     try:
-        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=4)
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         return proc.stdout.strip() if proc.returncode == 0 else ''
     except (OSError, subprocess.TimeoutExpired, UnicodeError):
         return ''
@@ -54,6 +56,43 @@ def repository(folder):
     remote = command_output(['git', 'remote', 'get-url', 'origin'], folder)
     match = re.search(r'github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$', remote, re.I)
     return match[1] if match else ''
+
+
+def summarize(pull):
+    """Reduce `gh pr view --json` output to what one row of the Changes list shows."""
+    checks = pull.get('statusCheckRollup') or []
+    finished = failed = 0
+    for check in checks:
+        if check.get('__typename') == 'StatusContext':
+            result = check.get('state')
+            done = result not in ('PENDING', 'EXPECTED')
+        else:
+            result = check.get('conclusion')
+            done = check.get('status') == 'COMPLETED'
+        finished += done
+        failed += done and result not in PASSED
+    state = pull.get('state')
+    count = lambda value: value if type(value) is int else None
+    return dict(title=str(pull.get('title') or ''), state='DRAFT' if pull.get('isDraft') and state == 'OPEN' else state,
+                additions=count(pull.get('additions')), deletions=count(pull.get('deletions')),
+                checks=len(checks), finished=finished, failed=failed)
+
+
+def pull_details(urls):
+    """Look up each PR on GitHub. PRs gh cannot read are omitted and stay plain links."""
+    urls = [url for url in dict.fromkeys(urls) if PR.fullmatch(url)]
+
+    def fetch(url):
+        fields = 'title,state,isDraft,additions,deletions,statusCheckRollup'
+        try:
+            return summarize(json.loads(command_output(['gh', 'pr', 'view', url, '--json', fields], '/', timeout=15)))
+        except (ValueError, AttributeError, TypeError):
+            return None
+
+    if not urls:
+        return {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return {url: found for url, found in zip(urls, pool.map(fetch, urls)) if found}
 
 
 def tool_result(db, key, name, args, result, folder, live=False):
