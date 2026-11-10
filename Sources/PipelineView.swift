@@ -48,8 +48,8 @@ enum PipelineText {
         if pipeline.finished == "merged" {
             return pipeline.finishAt.map { "merged " + clock($0, estimate: false) } ?? "merged"
         }
-        if pipeline.frozen { return nil }
         if pipeline.finished == "closed" { return "PR closed without merging" }
+        if pipeline.frozen { return nil }
         if let finishAt = pipeline.finishAt {
             return "about \(duration(finishAt - now.timeIntervalSince1970)) to go → merged ≈ \(clock(finishAt, estimate: false))"
         }

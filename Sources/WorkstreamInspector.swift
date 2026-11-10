@@ -28,38 +28,42 @@ struct WorkstreamInspector: View {
                         PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline)
                         Divider()
                     }
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text("Tasks").font(.title3.bold())
-                            Spacer()
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 9) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text("Tasks").font(.title3.bold())
+                                Spacer()
+                                if !stream.tasks.isEmpty {
+                                    let done = stream.tasks.filter { $0.status == "closed" }.count
+                                    Text("\(done) of \(stream.tasks.count) done")
+                                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                }
+                            }
                             if !stream.tasks.isEmpty {
-                                let done = stream.tasks.filter { $0.status == "closed" }.count
-                                Text("\(done) of \(stream.tasks.count) done")
-                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                ProgressView(value: Double(stream.tasks.filter { $0.status == "closed" }.count),
+                                             total: Double(stream.tasks.count))
+                                    .progressViewStyle(.linear).tint(.accentColor).accessibilityLabel("Tasks complete")
                             }
                         }
-                        if !stream.tasks.isEmpty {
-                            ProgressView(value: Double(stream.tasks.filter { $0.status == "closed" }.count),
-                                         total: Double(stream.tasks.count))
-                                .progressViewStyle(.linear).tint(.accentColor).accessibilityLabel("Tasks complete")
-                        }
-                    }
-                    if stream.tasks.isEmpty { Text("No tasks yet").foregroundStyle(.secondary) }
-                    ForEach(groups, id: \.self) { status in
-                        taskGroup(status)
-                    }
-                    if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
-                        Divider()
-                        DisclosureGroup(isExpanded: $detailExpanded) {
-                            Markdown(terminal.detail)
-                                .markdownTextStyle { FontSize(13) }
-                                .markdownImageProvider(.asset)
-                                .markdownInlineImageProvider(.asset)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.top, 6)
-                        } label: {
-                            Text(terminal.state == "Review" ? terminal.title + "’s reply" : "Activity").font(.headline)
+                        VStack(alignment: .leading, spacing: 22) {
+                            if stream.tasks.isEmpty { Text("No tasks yet").foregroundStyle(.secondary) }
+                            ForEach(groups, id: \.self) { status in
+                                taskGroup(status)
+                            }
+                            if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
+                                Divider()
+                                DisclosureGroup(isExpanded: $detailExpanded) {
+                                    Markdown(terminal.detail)
+                                        .markdownTextStyle { FontSize(13) }
+                                        .markdownImageProvider(.asset)
+                                        .markdownInlineImageProvider(.asset)
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.top, 6)
+                                } label: {
+                                    Text(terminal.state == "Review" ? terminal.title + "’s reply" : "Activity").font(.headline)
+                                }
+                            }
                         }
                     }
                 }
