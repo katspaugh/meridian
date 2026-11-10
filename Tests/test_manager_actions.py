@@ -24,6 +24,8 @@ with tempfile.TemporaryDirectory() as home:
         import streams
 
 ERROR = "The manager could not be reached. Check that Claude Code is signed in, then try again."
+NUDGE_CAP = ("The manager nudged this agent three times and it is waiting again. "
+             "Have a look at where it is stuck.")
 
 
 class Bridge(test_manager.Bridge):
@@ -63,6 +65,7 @@ class Bridge(test_manager.Bridge):
         if self.launch_error:
             raise self.launch_error
         self.launched.append(key)
+        self.live.add(key)  # As the real launch does: the new socket answers at once.
 
     def terminal_owner(self, key):
         db = sqlite3.connect(self.path)
@@ -151,11 +154,17 @@ class TellTests(Fixture):
         self.set_activity("t1", "Needs you")
         self.assertFalse(manager.tell(self.bridge, "t1", "hello"))
 
-    def test_tell_works_for_ready_and_working_codex_and_claude(self):
+    def test_tell_types_only_into_an_idle_codex_or_claude(self):
         self.terminal("c1", "codex", "Working")
-        for terminal, state in (("t1", "Ready"), ("t1", "Working"), ("c1", "Working"), ("c1", "Review")):
+        for terminal, state in (("t1", "Ready"), ("t1", "Review"), ("c1", "Ready"), ("c1", "Review")):
             self.set_activity(terminal, state)
             self.assertTrue(manager.tell(self.bridge, terminal, "Next task."))
+        self.run.reset_mock()
+        # A dialog can be on screen while the state still says Working, and Enter would accept it.
+        for terminal in ("t1", "c1"):
+            self.set_activity(terminal, "Working")
+            self.assertFalse(manager.tell(self.bridge, terminal, "Next task."))
+        self.run.assert_not_called()
 
     def test_tell_refuses_dead_shell_unknown_and_blank(self):
         self.terminal("s1", "shell", "Ready")
@@ -331,8 +340,50 @@ class SweepTests(Fixture):
         self.assertEqual(self.typed(), [b"\x1b[200~Run the tests.\x1b[201~", b"\r"])
         self.assertEqual(self.run.call_args_list[0].args[0][2], str(self.root / "sockets" / "c1"))
         self.assertEqual(self.events(), [("w1", "c1", "sweep", "tell", "Kept things moving.", {"message": "Run the tests."})])
+        self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: "
+                         "tell claude (terminal is on screen); tell ghost (unknown terminal)")
 
-    def test_sweep_restarts_opens_asks_and_remembers(self):
+    def test_sweep_skips_the_terminal_focused_by_the_time_it_types(self):
+        def consult(*args, **kwargs):
+            streams_main("manager-focus", "c1")  # The boss switched to c1 while the manager thought.
+            return self.reply([{"terminal": "t1", "action": "tell", "message": "Take w1.1 next."},
+                               {"terminal": "c1", "action": "tell", "message": "Run the tests."}])
+
+        def streams_main(*args):
+            with patch.object(streams, "ROOT", self.root):
+                streams.main(*args)
+        streams_main("manager-focus", "t1")
+        self.consult.side_effect = consult
+        manager.sweep(self.bridge)
+        self.assertEqual(self.typed(), [b"\x1b[200~Take w1.1 next.\x1b[201~", b"\r"])
+        self.assertTrue(self.setting("briefing").endswith("Not carried out: tell codex (terminal is on screen)"))
+        streams_main("manager-focus")
+        self.assertEqual(self.setting("focus"), "")
+        self.consult.side_effect = None
+        self.consult.return_value = self.reply([{"terminal": "c1", "action": "tell", "message": "Run the tests."}])
+        manager.sweep(self.bridge)
+        self.assertEqual(len(self.typed()), 4)
+        self.assertEqual(self.setting("briefing"), "Two streams moving.")
+
+    def test_a_tell_into_a_busy_terminal_is_reported(self):
+        self.set_activity("c1", "Working")
+        self.consult.return_value = self.reply([{"terminal": "c1", "action": "tell", "message": "Run the tests."}])
+        manager.sweep(self.bridge)
+        self.run.assert_not_called()
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.setting("briefing"),
+                         "Two streams moving.\n\nNot carried out: tell codex (terminal is busy or showing a dialog)")
+
+    def test_a_terminal_restarted_in_the_same_batch_is_not_told(self):
+        self.consult.return_value = self.reply([{"terminal": "t3", "action": "restart", "message": ""},
+                                                {"terminal": "t3", "action": "tell", "message": "Carry on."}])
+        manager.sweep(self.bridge)
+        self.assertEqual(self.bridge.launched, ["t3"])
+        self.run.assert_not_called()
+        self.assertEqual([e[3] for e in self.events()], ["restart"])
+        self.assertTrue(self.setting("briefing").endswith("Not carried out: tell claude (terminal is still starting)"))
+
+    def test_sweep_restarts_and_opens_asks_but_adds_no_notes(self):
         self.consult.return_value = self.reply(
             [{"terminal": "t3", "action": "restart", "message": ""},
              {"terminal": "t4", "action": "tell", "message": "The stream is done."},
@@ -353,7 +404,8 @@ class SweepTests(Fixture):
                                     "WHERE status='open' ORDER BY id"),
                          [("w1", "c1", "Ship to production?", '["Ship", "Wait"]', "Wait"),
                           ("w2", "t3", "Which docs host?", "[]", ""), ("w2", "", "Merge order?", "[]", "")])
-        self.remember.assert_called_once_with(self.root, ["Boss prefers small PRs."])
+        self.remember.assert_not_called()
+        self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: tell t4 (unknown terminal)")
 
     def test_sweep_consults_over_every_stream_without_a_lock_or_connection(self):
         seen, self.consult.side_effect = self.isolated()
@@ -365,6 +417,7 @@ class SweepTests(Fixture):
         self.assertEqual((kwargs["investigate"], kwargs["timeout"]), (True, 270))
         self.assertEqual(kwargs["folders"], [str(self.root), "/tmp/docs", "/tmp/old"])
         self.assertIn("Checkout flow", args[2])
+        self.assertNotIn("You are paused", args[2])
         self.assertEqual(self.bridge.locked_during_streams, [True])
         self.assertEqual(self.setting("briefing"), "Two streams moving.")
         self.assertAlmostEqual(float(self.setting("briefing_time")), time.time(), delta=5)
@@ -384,11 +437,11 @@ class SweepTests(Fixture):
         self.run.assert_not_called()
         self.assertEqual((self.setting("briefing"), self.events()), (None, []))
 
-    def test_a_failing_remember_keeps_the_sweep(self):
-        self.remember.side_effect = OSError("disk full")
+    def test_a_sweep_cannot_add_notes(self):
         self.consult.return_value = self.reply(remember=["Note."])
         manager.sweep(self.bridge)
         self.assertEqual(self.setting("briefing"), "Two streams moving.")
+        self.remember.assert_not_called()
 
     def test_a_paused_sweep_briefs_and_asks_but_does_not_act(self):
         with self.db() as db:
@@ -400,17 +453,54 @@ class SweepTests(Fixture):
         manager.sweep(self.bridge)
         self.run.assert_not_called()
         self.assertEqual((self.bridge.launched, self.events()), ([], []))
-        self.assertEqual(self.setting("briefing"), "Two streams moving.")
+        self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: "
+                         "tell codex (manager is paused); restart claude (manager is paused)")
         self.assertEqual([a["summary"] for a in manager.state(self.bridge)["asks"]], ["Ship it?"])
+        self.assertIn("\nYou are paused: return no actions.\n", self.consult.call_args.args[2])
 
-    def test_sweep_tells_count_as_nudges_and_stop_at_the_loop_guard(self):
+    def open_asks(self):
+        return self.query("SELECT id,stream,terminal,summary FROM manager_asks WHERE status='open' ORDER BY id")
+
+    def test_sweep_tells_count_as_nudges_and_ask_the_boss_at_the_loop_guard(self):
         self.consult.return_value = self.reply([{"terminal": "c1", "action": "tell", "message": "Run the tests."}])
-        for _ in range(store.MAX_NUDGES + 1):
+        for _ in range(store.MAX_NUDGES):
+            manager.sweep(self.bridge)
+        self.assertEqual((self.open_asks(), self.setting("briefing")), ([], "Two streams moving."))
+        for _ in range(2):
             manager.sweep(self.bridge)
         with self.db() as db:
             self.assertEqual(store.nudges(db, "c1"), store.MAX_NUDGES)
         self.assertEqual(len(self.typed()), 2 * store.MAX_NUDGES)
         self.assertEqual(len(self.events()), store.MAX_NUDGES)
+        asks = self.open_asks()
+        self.assertEqual([a[1:] for a in asks], [("w1", "c1", NUDGE_CAP)])
+        self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: tell codex (nudge limit reached)")
+        with patch.object(streams, "ROOT", self.root):
+            streams.main("manager-dismiss", str(asks[0][0]))
+        manager.sweep(self.bridge)
+        self.assertEqual(len(self.typed()), 2 * store.MAX_NUDGES + 2)
+        self.assertEqual(self.open_asks(), [])
+
+    def test_the_loop_guard_keeps_an_ask_already_open(self):
+        with self.db() as db:
+            for _ in range(store.MAX_NUDGES):
+                store.add_nudge(db, "c1")
+        self.consult.return_value = self.reply([{"terminal": "c1", "action": "tell", "message": "Run the tests."}],
+                                               asks=[{"stream": "w1", "terminal": "c1", "summary": "Ship it?",
+                                                      "options": [], "recommendation": ""}])
+        manager.sweep(self.bridge)
+        self.assertEqual([a[3] for a in self.open_asks()], ["Ship it?"])
+
+    def test_sweep_restarts_count_as_nudges_and_stop_at_the_loop_guard(self):
+        self.consult.return_value = self.reply([{"terminal": "t3", "action": "restart", "message": ""}])
+        for _ in range(store.MAX_NUDGES + 1):
+            self.bridge.live.discard("t3")
+            manager.sweep(self.bridge)
+        self.assertEqual(self.bridge.launched, ["t3"] * store.MAX_NUDGES)
+        with self.db() as db:
+            self.assertEqual(store.nudges(db, "t3"), store.MAX_NUDGES)
+        self.assertEqual([a[1:] for a in self.open_asks()], [("w2", "t3", NUDGE_CAP)])
+        self.assertTrue(self.setting("briefing").endswith("Not carried out: restart claude (nudge limit reached)"))
 
     def test_a_sweep_is_not_due_while_it_runs(self):
         due = []
@@ -420,14 +510,23 @@ class SweepTests(Fixture):
         self.assertEqual(due, [False])
 
     def test_one_failing_action_does_not_stop_the_others(self):
-        self.run.side_effect = RuntimeError("unexpected")
+        self.run.side_effect = RuntimeError("SECRET unexpected")
         self.consult.return_value = self.reply([{"terminal": "c1", "action": "tell", "message": "Run the tests."},
-                                                {"terminal": "t3", "action": "restart", "message": ""}],
-                                               remember=["Note."])
-        manager.sweep(self.bridge)
+                                                {"terminal": "t3", "action": "restart", "message": ""}])
+        with patch.object(manager.workstream_log, "record") as record:
+            manager.sweep(self.bridge)
         self.assertEqual(self.bridge.launched, ["t3"])
         self.assertEqual([e[3] for e in self.events()], ["restart"])
-        self.remember.assert_called_once_with(self.root, ["Note."])
+        self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: tell codex (RuntimeError)")
+        lines = [c.args[0] for c in record.call_args_list]
+        self.assertTrue(any("RuntimeError" in line for line in lines))
+        self.assertFalse(any("SECRET" in line or "Run the tests" in line for line in lines))
+
+    def test_a_restart_that_fails_is_reported(self):
+        self.bridge.launch_error = ValueError("Reopen this workstream first.")
+        self.consult.return_value = self.reply([{"terminal": "t3", "action": "restart", "message": ""}])
+        manager.sweep(self.bridge)
+        self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: restart claude (could not restart)")
 
 
 class OverviewTests(Fixture):
@@ -506,6 +605,8 @@ class ChatTests(Fixture):
         self.assertIsNone(self.setting("chat_session"))
 
     def test_chat_acts_types_regardless_of_focus_and_remembers(self):
+        with self.db() as db:
+            store.set_setting(db, "focus", "t1")
         seen, self.consult.side_effect = self.isolated()
         self.consult.return_value = {"reply": "Told it to use SQLite.", "remember": ["Boss prefers SQLite."], "actions": [
             {"terminal": "t1", "action": "tell", "message": "Use SQLite."},
@@ -522,7 +623,8 @@ class ChatTests(Fixture):
         self.assertTrue(self.events()[0][4])
         self.remember.assert_called_once_with(self.root, ["Boss prefers SQLite."])
         self.assertEqual([(m["role"], m["text"]) for m in self.chat()],
-                         [("user", "Tell the checkout agent to use SQLite."), ("manager", "Told it to use SQLite.")])
+                         [("user", "Tell the checkout agent to use SQLite."),
+                          ("manager", "Told it to use SQLite.\n\nNot carried out: tell ghost (unknown terminal)")])
 
     def test_chat_acts_while_paused_and_its_tells_are_not_nudges_or_limited(self):
         with self.db() as db:
@@ -540,8 +642,15 @@ class ChatTests(Fixture):
         self.consult.return_value = {"reply": "On it.", "remember": ["Note."],
                                      "actions": [{"terminal": "t1", "action": "tell", "message": "Go."}]}
         manager.chat(self.bridge, "Tell it to go.")
-        self.assertEqual([m["role"] for m in self.chat()], ["user", "manager"])
+        self.assertEqual([(m["role"], m["text"]) for m in self.chat()],
+                         [("user", "Tell it to go."), ("manager", "On it.\n\nNot carried out: tell claude (RuntimeError)")])
         self.remember.assert_called_once_with(self.root, ["Note."])
+
+    def test_a_chat_reply_whose_actions_all_ran_is_stored_as_written(self):
+        self.consult.return_value = {"reply": "Asked it to go.", "actions": [
+            {"terminal": "t1", "action": "tell", "message": "Go."}]}
+        manager.chat(self.bridge, "Tell it to go.")
+        self.assertEqual(self.chat()[-1]["text"], "Asked it to go.")
 
 
 class BridgeActionTests(unittest.TestCase):
@@ -586,6 +695,18 @@ class BridgeActionTests(unittest.TestCase):
         self.assertIs(self.state()["paused"], False)
         with self.assertRaises(ValueError):
             self.main("manager-pause", "yes")
+
+    def test_focus_is_set_and_cleared(self):
+        self.main("manager-focus", "term-1")
+        with streams.database() as db:
+            self.assertEqual(store.setting(db, "focus"), "term-1")
+        self.main("manager-focus", "")
+        with streams.database() as db:
+            self.assertEqual(store.setting(db, "focus"), "")
+        self.main("manager-focus", "term-2")
+        self.main("manager-focus")
+        with streams.database() as db:
+            self.assertEqual(store.setting(db, "focus"), "")
 
     def test_state_has_every_key_the_app_decodes(self):
         self.assertEqual(set(self.state()), {"paused", "briefing", "briefingTime", "briefingStale", "sweepDue",

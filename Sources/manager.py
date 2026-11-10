@@ -44,7 +44,7 @@ FIELDS = ("`summary` is one line for the boss's activity log. `message` is what 
           "With `ask`, the `ask` object is what the boss sees: the decision, the real options, and your recommendation "
           "if you have one. List any product decision you take under `decisions`.")
 ACTIONS = ("`tell` types `message` into a terminal as a prompt; it works only on Claude and Codex terminals that are "
-           "Review, Ready or Working. `restart` starts an Offline terminal again; leave its `message` empty.")
+           "idle, Review or Ready. `restart` starts an Offline terminal again; leave its `message` empty.")
 SWEEP = ("# Trigger: sweep\nYou are looking over every workstream for what no hook reports: a Codex terminal that "
          "stopped or asked something, an idle agent whose blocker has since cleared, a stopped terminal with ready "
          "work. Return `briefing`, a short Markdown summary for the boss across all workstreams, conclusion first: "
@@ -54,9 +54,13 @@ SWEEP = ("# Trigger: sweep\nYou are looking over every workstream for what no ho
 CHAT = ("# Trigger: chat\nThe boss is writing to you. Answer in `reply`, conclusion first. When the boss asks you to "
         "tell an agent something or to restart a terminal, put it under `actions`. " + ACTIONS +
         " Add any preference or standing instruction the boss states to `remember`.")
+SWEEP_PAUSED = "You are paused: return no actions."
 CHAT_ACTION = "The boss asked for this in chat."
 UNREACHABLE = "The manager could not be reached. Check that Claude Code is signed in, then try again."
-TELLABLE = ("Review", "Ready", "Working")
+NUDGE_CAP = ("The manager nudged this agent three times and it is waiting again. "
+             "Have a look at where it is stuck.")
+# Only an idle agent: a dialog can be on screen while the state still says Working, and Enter would accept it.
+TELLABLE = ("Review", "Ready")
 SWEEP_INTERVAL = 120
 
 
@@ -153,7 +157,7 @@ def remember(bridge, reply):
         try:
             brain.remember(bridge.ROOT, items)
         except Exception:
-            pass  # The verdict is already stored; a lost note must not discard it.
+            pass  # The reply is already stored; a lost note must not discard it.
 
 
 def status(outcome, subagent):
@@ -400,46 +404,76 @@ def _snapshot(bridge):
     return rows, known, folders
 
 
-def _act(bridge, reply, known, trigger, summary, exclude=None):
-    """Applies each valid action, with no lock or transaction held, and logs the ones that took effect."""
+def _act(bridge, reply, known, trigger, summary, exclude=None, paused=False):
+    """Applies each valid action, with no lock or transaction held, and logs the ones that took effect.
+    Returns the ones that did not, as (action, terminal, reason)."""
+    missed, restarted = [], set()
     for item in reply.get("actions") if isinstance(reply.get("actions"), list) else []:
-        if not isinstance(item, dict) or not isinstance(item.get("terminal"), str) or item["terminal"] not in known:
+        if not isinstance(item, dict) or not isinstance(item.get("terminal"), str) \
+                or item.get("action") not in ("tell", "restart"):
             continue
-        try:
-            _act_one(bridge, item, trigger, summary, exclude)
-        except Exception:
-            pass  # One action that fails must not cost the others.
+        terminal, action = item["terminal"], item["action"]
+        if terminal not in known:
+            reason = "unknown terminal"
+        elif paused:
+            reason = "manager is paused"
+        elif action == "tell" and terminal in restarted:
+            reason = "terminal is still starting"
+        else:
+            try:
+                reason = _act_one(bridge, item, known[terminal], trigger, summary, exclude)
+            except Exception as exc:  # One action that fails must not cost the others.
+                workstream_log.record(f"manager action={action} failed type={type(exc).__name__}")
+                reason = type(exc).__name__
+        if reason:
+            missed.append((action, terminal, reason))
+        elif action == "restart":
+            restarted.add(terminal)
+    return missed
 
 
-def _act_one(bridge, item, trigger, summary, exclude):
-    terminal, action, message = item["terminal"], item.get("action"), str(item.get("message") or "")
-    # Sweep tells count towards the loop guard; tells the boss asked for in chat do not.
-    guarded = trigger == "sweep" and action == "tell"
+def _act_one(bridge, item, stream, trigger, summary, exclude):
+    """Carries out one action; returns why it was not carried out, or None."""
+    terminal, action, message = item["terminal"], item["action"], str(item.get("message") or "")
+    # Sweep actions count towards the loop guard; what the boss asked for in chat does not.
+    guarded = trigger == "sweep"
     if guarded:
         with transaction(bridge) as db:
             if store.nudges(db, terminal) >= store.MAX_NUDGES:
-                return
-    if action == "tell":
-        done = terminal != exclude and tell(bridge, terminal, message)
-    elif action == "restart":
-        done = restart(bridge, terminal)
-    else:
-        return
-    if done:
-        stream = bridge.terminal_owner(terminal)
-        with transaction(bridge) as db:
-            if guarded:
-                store.add_nudge(db, terminal)
-            store.record_event(db, stream, terminal, trigger, action, summary, {"message": message})
+                if not db.execute("SELECT 1 FROM manager_asks WHERE terminal=? AND status='open'",
+                                  (terminal,)).fetchone():
+                    store.open_ask(db, stream, terminal, NUDGE_CAP, [], "")
+                return "nudge limit reached"
+            # Read now, not before the consult: the boss may have switched terminals while it ran.
+            if action == "tell" and terminal in (exclude, store.setting(db, "focus")):
+                return "terminal is on screen"
+    if action == "tell" and not tell(bridge, terminal, message):
+        return "terminal is busy or showing a dialog"
+    if action == "restart" and not restart(bridge, terminal):
+        return "could not restart"
+    with transaction(bridge) as db:
+        if guarded:
+            store.add_nudge(db, terminal)
+        store.record_event(db, stream, terminal, trigger, action, summary, {"message": message})
+    return None
+
+
+def not_carried_out(missed, rows):
+    titles = {t.get("id"): t.get("title") for row in rows if row.get("state") != "Done"
+              for t in row.get("terminals") or []}
+    return "Not carried out: " + "; ".join(f"{action} {titles.get(terminal) or terminal} ({reason})"
+                                           for action, terminal, reason in missed)
 
 
 def sweep(bridge, exclude=None):
     rows, known, folders = _snapshot(bridge)
     due, overall = signature(rows), overall_signature(rows)
     mark_swept(bridge, due)  # Before the consult too, so no second sweep starts while this one runs.
+    with transaction(bridge) as db:
+        paused = store.paused(db)
     try:
-        reply = brain.consult(bridge.ROOT, "sweep", SWEEP + "\n\n" + overview(bridge, rows), investigate=True,
-                              timeout=270, folders=folders)
+        reply = brain.consult(bridge.ROOT, "sweep", SWEEP + ("\n" + SWEEP_PAUSED if paused else "") + "\n\n"
+                              + overview(bridge, rows), investigate=True, timeout=270, folders=folders)
     finally:
         # A failed sweep still waits its interval, so a broken consult is not retried every few seconds.
         mark_swept(bridge, due)
@@ -463,9 +497,10 @@ def sweep(bridge, exclude=None):
             options = ask.get("options")
             options = [str(o) for o in options if str(o).strip()] if isinstance(options, list) else []
             store.open_ask(db, ask["stream"], terminal, text, options, str(ask.get("recommendation") or ""))
-    if not paused:
-        _act(bridge, reply, known, "sweep", str(reply.get("summary") or ""), exclude)
-    remember(bridge, reply)
+    missed = _act(bridge, reply, known, "sweep", str(reply.get("summary") or ""), exclude, paused)
+    if missed:
+        with transaction(bridge) as db:
+            store.set_setting(db, "briefing", reply["briefing"].rstrip() + "\n\n" + not_carried_out(missed, rows))
 
 
 def mark_swept(bridge, due):
@@ -500,8 +535,12 @@ def chat(bridge, text):
             store.add_chat(db, "error", UNREACHABLE)
             return
         store.set_setting(db, "chat_session", session)
-        store.add_chat(db, "manager", answer)
-    _act(bridge, reply, known, "chat", CHAT_ACTION)
+        message = store.add_chat(db, "manager", answer)
+    missed = _act(bridge, reply, known, "chat", CHAT_ACTION)
+    if missed:
+        with transaction(bridge) as db:
+            db.execute("UPDATE manager_chat SET text=? WHERE id=?",
+                       (answer.rstrip() + "\n\n" + not_carried_out(missed, rows), message))
     remember(bridge, reply)
 
 

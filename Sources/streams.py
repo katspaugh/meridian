@@ -560,9 +560,12 @@ def main(action, *args):
     if action == "manager-chat":
         text, = args
         return manager.chat(sys.modules[__name__], text)
-    if action in ("manager-pause", "manager-dismiss", "manager-seen"):
+    if action in ("manager-pause", "manager-dismiss", "manager-seen", "manager-focus"):
         with database() as db:
-            if action == "manager-pause":
+            if action == "manager-focus":
+                # The terminal the boss has on screen, or "" when none is or the app is in the background.
+                manager_store.set_setting(db, "focus", args[0] if args else "")
+            elif action == "manager-pause":
                 value, = args
                 if value not in ("0", "1"):
                     raise ValueError("Use manager-pause 0 or 1.")
