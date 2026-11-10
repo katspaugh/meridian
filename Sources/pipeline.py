@@ -409,7 +409,8 @@ def schedule(run, now):
         status = stamp["status"]
 
         if phase == "execute":
-            is_untracked = status == "running" and not _tracks_tasks(run)
+            tracks = _tracks_tasks(run)
+            is_untracked = status == "running" and not tracks
             if (not run["tasks"] and status != "done") or is_untracked:
                 cursor = None
             previous_end = stamp.get("startedAt")
@@ -424,8 +425,15 @@ def schedule(run, now):
                     tasks.append(_task_slot(task["n"], implement.get("startedAt"), review.get("endedAt"),
                                             False, "done", "done", "done"))
                     continue
-                if status == "done":
+                # Execute is over: an untracked run's tasks are drawn as done, a
+                # tracked run's unfinished ones as left undone.
+                if status == "done" and not tracks:
                     tasks.append(_task_slot(task["n"], None, None, False, "done", "done", "done"))
+                    continue
+                if status == "done":
+                    tasks.append(_task_slot(task["n"], None, None, False, "todo",
+                                            "done" if implement["status"] == "done" else "todo",
+                                            "done" if review["status"] == "done" else "todo"))
                     continue
                 is_active = (implement["status"] == "running" or review["status"] == "running"
                              or (not has_running and status == "running"))
@@ -486,7 +494,7 @@ def _when(slot):
     return None, False
 
 
-def _phase_detail(run, phase):
+def _phase_detail(run, plan, phase):
     tasks = run["tasks"]
     if phase == "brainstorm":
         return slug_name(run["specPath"]) if run.get("specPath") else ""
@@ -495,7 +503,7 @@ def _phase_detail(run, phase):
             return "1 task" if len(tasks) == 1 else "{} tasks".format(len(tasks))
         return slug_name(run["planPath"]) if run.get("planPath") else ""
     if phase == "execute" and tasks:
-        done = sum(1 for task in tasks if task["review"]["status"] == "done")
+        done = sum(1 for slot in plan["tasks"] if slot["view"] == "done")
         return "{} of {}".format(done, len(tasks))
     if phase == "pr" and run.get("pr") is not None:
         return "#{}".format(run["pr"])
@@ -530,7 +538,7 @@ def render(run, now, waiting=False, active_agents=0, frozen=False):
         time, estimate = _when(slot)
         item = {
             "id": phase, "label": PHASE_LABEL[phase], "mark": slot["view"], "time": time, "estimate": estimate,
-            "detail": _phase_detail(run, phase), "url": run.get("prUrl") if phase == "pr" else None, "tasks": None,
+            "detail": _phase_detail(run, plan, phase), "url": run.get("prUrl") if phase == "pr" else None, "tasks": None,
         }
         if phase == "execute":
             item["tasks"] = []

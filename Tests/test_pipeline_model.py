@@ -219,6 +219,8 @@ class ScheduleTests(unittest.TestCase):
         plan = pipeline.schedule(run, T0 + 62 * MIN)
         self.assertEqual([t['view'] for t in plan['tasks']], ['done', 'done', 'done'])
         self.assertEqual([t['end'] for t in plan['tasks']], [None, None, None])
+        tasks = next(p for p in pipeline.render(run, T0 + 62 * MIN)['phases'] if p['id'] == 'execute')
+        self.assertEqual(tasks['detail'], '3 of 3')
 
     def test_render_marks_the_waiting_phase_and_hides_skipped_ones(self):
         view = pipeline.render(planned(), T0 + 6 * MIN, waiting=True)
@@ -244,6 +246,7 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual((pr['detail'], pr['url'], view['polling']), ('#12', 'https://github.com/o/r/pull/12', True))
         tasks = next(p for p in view['phases'] if p['id'] == 'execute')
         self.assertEqual(tasks['detail'], '1 of 3')
+        self.assertEqual([t['mark'] for t in tasks['tasks']], ['done', 'todo', 'todo'])
         frozen = pipeline.render(run, T0 + 41 * MIN, waiting=True, frozen=True)
         ci = next(p for p in frozen['phases'] if p['id'] == 'ci')
         self.assertEqual((ci['mark'], ci['time'], ci['estimate']), ('todo', None, False))
