@@ -176,6 +176,39 @@ def command_event(db, key, command, output, now):
     update(db, stream, lambda run: pipeline.attach_workspace(run, workspace, plan_path, parsed, now))
 
 
+def pr_view(url):
+    """gh's view of a pull request's state and checks, None when gh cannot answer."""
+    try:
+        result = subprocess.run(["gh", "pr", "view", url, "--json", "state,statusCheckRollup"],
+                                capture_output=True, encoding="utf-8", errors="replace", timeout=20)
+        if result.returncode != 0:
+            return None
+        view = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return view if isinstance(view, dict) else None
+
+
+def poll_pull_requests(db, streams, now, view=None):
+    """Apply gh's view of each live run's pull request; gh runs with no transaction open."""
+    view = view or pr_view
+    for stream in streams:
+        run = load(db, stream)
+        url = run.get("prUrl") if run is not None else None
+        if not isinstance(url, str) or not url or pipeline.is_finished(run):
+            continue
+        answer = view(url)
+        if not isinstance(answer, dict):
+            continue
+
+        def change(run, url=url, answer=answer):
+            # A hook may have finished the run or opened another pull request while gh ran.
+            if run is None or pipeline.is_finished(run) or run.get("prUrl") != url:
+                return run
+            return pipeline.apply_pr_view(run, answer, now)
+        update(db, stream, change)
+
+
 def timestamp(text):
     """An ISO time such as 2026-11-10T05:41:25Z as epoch seconds, 0.0 when it cannot be parsed."""
     match = ISO_TIME.match(text.strip()) if isinstance(text, str) else None

@@ -238,6 +238,59 @@ class TrackerTests(unittest.TestCase):
         error.assert_called_once()
         self.assertEqual((row['id'], row['pipeline'], row['documents']), ('mx-example', None, []))
 
+    def at_ci(self):
+        self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
+        self.post('mx-example', 'Bash', {'command': 'gh pr create'}, {'stdout': 'https://github.com/o/r/pull/12'})
+
+    def test_poll_applies_the_pull_request_view(self):
+        self.at_ci()
+        seen = []
+        def view(url):
+            seen.append(url)
+            # gh runs with the write lock free, so hooks are not kept waiting.
+            with contextlib.closing(streams.sqlite3.connect(streams.ROOT / 'activity.sqlite', timeout=0)) as probe:
+                probe.execute('BEGIN IMMEDIATE')
+                probe.rollback()
+            return {'state': 'OPEN', 'statusCheckRollup': [{'status': 'COMPLETED', 'conclusion': 'SUCCESS'}]}
+        with patch.object(tracker, 'pr_view', side_effect=view):
+            streams.main('pipeline-poll', 'mx-example', 'mx-unknown')
+        run = self.run_state()
+        self.assertEqual(seen, ['https://github.com/o/r/pull/12'])
+        self.assertEqual((run['phases']['ci']['status'], run['phases']['merge']['status'], run['ciDetail']), ('done', 'running', '1 passed'))
+
+    def test_poll_leaves_the_run_alone_when_gh_fails_or_the_run_is_finished(self):
+        self.at_ci()
+        before = self.run_state()
+        with streams.database() as db:
+            tracker.poll_pull_requests(db, ['mx-example'], 5.0, view=lambda url: None)
+        self.assertEqual(self.run_state(), before)
+        with streams.database() as db:
+            tracker.update(db, 'mx-example', lambda run: pipeline.complete_phase(run, 'merge', 6.0))
+            tracker.poll_pull_requests(db, ['mx-example'], 7.0, view=lambda url: self.fail('polled a finished run'))
+
+    def test_pr_view_survives_a_missing_gh(self):
+        with patch.object(tracker.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertIsNone(tracker.pr_view('https://github.com/o/r/pull/12'))
+
+    def test_codex_root_commands_reach_the_pipeline_and_child_commands_do_not(self):
+        import codex_session
+        def thread(identity, parent):
+            return {'thread': {'status': {'type': 'idle'}, 'parentThreadId': parent, 'cwd': str(self.folder)}}
+        def turn(output):
+            return {'data': [{'id': 't', 'status': 'completed', 'items': [
+                {'type': 'commandExecution', 'exitCode': 0, 'command': 'gh pr create', 'aggregatedOutput': output}]}]}
+        class Client:
+            def call(inner, method, params):
+                if method == 'thread/loaded/list':
+                    return {'data': ['root', 'child']}
+                if method == 'thread/read':
+                    return thread(params['threadId'], None if params['threadId'] == 'root' else 'root')
+                return turn('https://github.com/o/r/pull/7' if params['threadId'] == 'root' else 'https://github.com/o/r/pull/8')
+        self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
+        with streams.database() as db:
+            codex_session.observe(Client(), db, 'term-extra', None, {})
+        self.assertEqual(self.run_state()['pr'], 7)
+
 
 class SnapshotTests(unittest.TestCase):
     def setUp(self):

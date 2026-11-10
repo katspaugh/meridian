@@ -590,6 +590,11 @@ def main(action, *args):
         with database() as db:
             tracker.reset(db, stream)
         return
+    if action == "pipeline-poll":
+        # gh may take seconds per pull request, so the poll never holds bridge.lock.
+        with database() as db:
+            tracker.poll_pull_requests(db, args, time.time())
+        return
     if action == "attach":
         key, = args
         if Path(key).name != key:
