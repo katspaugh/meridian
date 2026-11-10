@@ -79,11 +79,16 @@ Codex terminals have no hooks. If the app's existing Codex connection already re
 
 ### Manager in the sidebar
 
-The **Manager** entry's badge today counts open questions. It now counts all unread messages. The Manager view gains a list of every current message across workstreams, newest first, with the same buttons. This is where reminders wait if the owner never opens the stream.
+The **Manager** entry's badge today counts open questions. It now counts unread open questions, reminders, next messages, and rule proposals. Status lines never count, so the badge does not sit at the number of active workstreams. A message is read once it has been shown in the slot while Muxteroid is the active app, or once the owner acts on it. (Call.) The Manager view gains a list of every current message across workstreams, newest first, with the same buttons. This is where reminders wait if the owner never opens the stream.
 
 ## What the manager says, and when
 
-The manager already runs a sweep over all workstreams when something changes, at most every two minutes. The sweep's reply gains a list of messages, at most one per kind per workstream. Each message has:
+Messages come from two consults the manager already makes, plus two new sweep triggers. No consult is added per agent turn.
+
+- **Stop review (per turn, Claude).** Each time a Claude agent ends its turn, the manager already reviews it. Its reply gains that workstream's status and next messages. This is the main source, because the existing sweep almost never runs for workstreams with only live Claude terminals: its change check (`manager.signature()`) covers only terminals the hooks cannot see. (Call: reuse the Stop review rather than widen the sweep's trigger, which would mean a full consult over every workstream up to every two minutes. The owner can override this if messages feel stale.)
+- **Sweep (all workstreams).** Its reply gains messages too, for every kind and every workstream. It is the only source of reminders and of messages about Codex and stopped terminals.
+
+Each message has:
 
 - the workstream (and terminal, if it is about one)
 - its kind: status, next, or reminder
@@ -98,9 +103,12 @@ What each kind is for:
 
 When it speaks:
 
-- **When something changes**, through the existing sweep.
-- **When the owner comes back.** If Muxteroid becomes the active app after 30 minutes or more away, it runs one sweep so the status lines are fresh. (Call.)
-- **Over time.** Reminders depend on how long something has waited, which no event reports. The sweep's change check also changes once an hour, so waiting things get looked at hourly. (Call.)
+- **When an agent ends a turn**, through the Stop review.
+- **When something hooks cannot see changes**, through the existing sweep trigger.
+- **When the owner comes back.** If Muxteroid becomes the active app after 30 minutes or more away, it runs one sweep so the lines are fresh. (Call.)
+- **Hourly.** Reminders depend on how long something has waited, which no event reports. While the app is open and any workstream is not Done, a sweep runs at least once an hour, whether or not the change check fired. (Call.)
+
+"PR is green" needs PR check status. The Stop review and sweep may look it up with the read-only `gh` commands they already have; the app does not add PR polling for this. (Call.)
 
 When paused, the manager says nothing new. The Now line and the planned-steps rule still work, since they are app features, not manager consults.
 
@@ -108,11 +116,13 @@ When paused, the manager says nothing new. The Now line and the planned-steps ru
 
 A button does one of these:
 
-- **Tell:** types a message into one of the stream's idle Claude or Codex terminals, using the existing tell mechanism and its rules: only when the agent is idle, never into a terminal the owner is typing in. **Merge** is a Tell: "The PR is green. Merge it." The agent does the merge, not the manager.
+- **Tell:** types a message into one of the stream's Claude or Codex terminals, using the existing tell mechanism. **Merge** is a Tell: "The PR is green. Merge it." The agent does the merge, not the manager. Because the owner pressed the button, it is treated like a tell the owner asked for in chat: it may type into the terminal on screen. It still types only into an idle agent (Review or Ready). While the agent is busy the button is disabled, with "Agent is busy" on hover. (Call.)
 - **Open:** selects the stream, a terminal, or a link (PR, issue).
-- **Later:** hides the message until the stream changes in a way that would change the message. (Call: "changes" means the same stream signature the sweep already uses.)
+- **Later:** hides this message. A later message with different text shows as normal; one with the same text stays hidden. (Call. There is no per-workstream change signature to compare against, and this avoids inventing one.)
 - **Save** / **No:** for a proposed rule (below).
-- **Answer:** for an open question, the existing answer flow.
+- **Details:** opens the Manager view at this message, for open questions whose full text does not fit.
+
+Open questions in the slot show a one-line form: the decision, cut to 100 characters, with **Open** (selects the terminal) and **Details**. Their options and recommendation stay in the Manager view and are not buttons. The terminal behind a question usually has a dialog on screen, and typing into it is unsafe. Muxteroid has no answer flow today and this design does not add one. (Call.)
 
 The manager chooses buttons from this list only. Every button press goes into the activity log.
 
@@ -125,6 +135,10 @@ On each prompt the owner sends to an agent, the app records the prompt's text (f
 The sweep's context includes the owner's last 30 prompts for each project with an active stream. When the manager sees the same kind of instruction two or three times, it proposes a rule as a message in the slot:
 
 > You always finish with push → rebuild → reinstall. Make that "done" for Muxteroid? **[Save] [No]**
+
+A proposal carries two texts: the one-line message, and the full rule as it would be written, a few lines at most. **Save** does not save straight away. It opens a small popover beside the slot showing the full rule, with **Save** and **Cancel**. Only text the owner has seen is written. This is the one place the slot opens more than a line, because the rule goes to every agent in the project and can include pushing to main. (Call.)
+
+A proposal shows in one workstream only: the one in that repository where the owner sent a prompt most recently.
 
 **No** means the manager does not propose that rule again. (Call: remembered as a note so the manager sees it.)
 
@@ -155,7 +169,7 @@ The builder must check that the after-tool hook's extra context reaches Claude i
 
 ## Where things go
 
-- `manager.py`: sweep prompt and reply handling for messages; the come-back and hourly triggers; project rules in Stop reviews and agent context; the planned-steps reminder.
+- `manager.py`: Stop-review and sweep prompts and reply handling for messages, including a short form for asks; the come-back and hourly triggers; project rules in Stop reviews and agent context; the planned-steps reminder.
 - `manager_store.py`: a table for messages (with read, later, and dismissed state) and a table for prompt text per project.
 - `manager_role.md`: the bite-sized rule, the three kinds of message, and rule proposals. It stays a role, not a rulebook.
 - `streams.py`: record what the current tool is for the Now line; add project rules to `agent_context`; change the planned-steps instruction.
