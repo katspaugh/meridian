@@ -523,6 +523,40 @@ class ManagerReviewTests(Fixture):
         self.assertEqual(self.events(), [("denied", "failed", "The approved Bash action ran and failed.",
                                           '{"message": ""}')])
 
+    def evidence_cases(self):
+        command = {"command": "make dist"}
+        allow = manager.Outcome({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                                        "permissionDecisionReason": manager.APPROVED}}, None, None)
+        return [("retry-allowed", self.event("PreToolUse", tool_name="Bash", tool_input=command), allow),
+                ("prompt-allowed", self.event("PermissionRequest", tool_name="Bash", tool_input=command),
+                 manager.Outcome(ALLOW_PERMISSION, "Working", manager.APPROVED)),
+                ("blocked-again", self.event("PermissionDenied", tool_name="Bash", tool_input=command, reason="x"),
+                 manager.Outcome(manager.RETRY, None, None)),
+                ("ran", self.event("PostToolUse", tool_name="Bash", tool_input=command), manager.NOTHING),
+                ("failed", self.event("PostToolUseFailure", tool_name="Bash", tool_input=command), manager.NOTHING)]
+
+    def test_a_failed_evidence_write_changes_no_decision(self):
+        broken = [("record_event", patch.object(manager.store, "record_event", side_effect=sqlite3.OperationalError("locked"))),
+                  ("terminal_owner", patch.object(self.bridge, "terminal_owner", side_effect=sqlite3.OperationalError("locked")))]
+        for failing, breaking in broken:
+            for verdict, event, expected in self.evidence_cases():
+                # The other reviews resolve the workstream before any decision, as they did before the evidence.
+                if failing == "terminal_owner" and verdict in ("prompt-allowed", "blocked-again"):
+                    continue
+                with self.db() as db:
+                    db.execute("DELETE FROM manager_approvals")
+                    store.approve(db, "t1", "Bash", {"command": "make dist"})
+                    store.open_ask(db, "t1", "t1", "Which account?", [], "")
+                with breaking, patch.object(manager.workstream_log, "record") as record:
+                    self.assertEqual(manager.review(self.bridge, "t1", "s", event), expected, (failing, verdict))
+                record.assert_called_once_with(f"manager evidence verdict={verdict} failed type=OperationalError")
+                approvals = self.query("SELECT count(*) FROM manager_approvals")
+                self.assertEqual(approvals, [(0 if verdict in ("ran", "failed") else 1,)], (failing, verdict))
+                if verdict in ("ran", "failed"):
+                    self.assertEqual(self.asks(), [])
+        self.assertEqual(self.events(), [])
+        self.consult.assert_not_called()
+
     def test_a_plain_tool_call_records_no_event(self):
         for name in ("PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure"):
             event = self.event(name, tool_name="Bash", tool_input={"command": "ls"})
