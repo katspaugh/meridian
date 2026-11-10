@@ -272,23 +272,49 @@ class TrackerTests(unittest.TestCase):
         with patch.object(tracker.subprocess, 'run', side_effect=FileNotFoundError):
             self.assertIsNone(tracker.pr_view('https://github.com/o/r/pull/12'))
 
-    def test_codex_root_commands_reach_the_pipeline_and_child_commands_do_not(self):
-        import codex_session
-        def thread(identity, parent):
-            return {'thread': {'status': {'type': 'idle'}, 'parentThreadId': parent, 'cwd': str(self.folder)}}
-        def turn(output):
-            return {'data': [{'id': 't', 'status': 'completed', 'items': [
+    def codex(self, threads):
+        """A fake Codex app-server. threads maps an id to [parent, status type, turn id or None, command output]."""
+        folder = str(self.folder)
+        def turn(identity):
+            _, _, turn_id, output = threads[identity]
+            if turn_id is None:
+                return {'data': []}
+            return {'data': [{'id': turn_id, 'status': 'completed', 'items': [
                 {'type': 'commandExecution', 'exitCode': 0, 'command': 'gh pr create', 'aggregatedOutput': output}]}]}
         class Client:
             def call(inner, method, params):
                 if method == 'thread/loaded/list':
-                    return {'data': ['root', 'child']}
+                    return {'data': list(threads)}
                 if method == 'thread/read':
-                    return thread(params['threadId'], None if params['threadId'] == 'root' else 'root')
-                return turn('https://github.com/o/r/pull/7' if params['threadId'] == 'root' else 'https://github.com/o/r/pull/8')
+                    parent, state = threads[params['threadId']][:2]
+                    return {'thread': {'status': {'type': state}, 'parentThreadId': parent, 'cwd': folder}}
+                return turn(params['threadId'])
+        return Client()
+
+    def test_codex_root_commands_reach_the_pipeline_and_child_commands_do_not(self):
+        import codex_session
+        threads = {'root': [None, 'active', None, ''], 'child': ['root', 'idle', None, '']}
         self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
+        cache = {}
         with streams.database() as db:
-            codex_session.observe(Client(), db, 'term-extra', None, {})
+            previous = codex_session.observe(self.codex(threads), db, 'term-extra', None, cache)
+            threads['root'][1:] = ['idle', 't1', 'https://github.com/o/r/pull/7']
+            threads['child'][1:] = ['idle', 'c1', 'https://github.com/o/r/pull/8']
+            codex_session.observe(self.codex(threads), db, 'term-extra', previous, cache)
+        self.assertEqual(self.run_state()['pr'], 7)
+
+    def test_codex_replays_nothing_after_a_restart(self):
+        import codex_session
+        threads = {'root': [None, 'idle', 't1', 'https://github.com/o/r/pull/7']}
+        self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
+        cache = {}
+        with streams.database() as db:
+            previous = codex_session.observe(self.codex(threads), db, 'term-extra', None, cache)
+            self.assertNotIn('pr', self.run_state())
+            previous = codex_session.observe(self.codex(threads), db, 'term-extra', previous, cache)
+            self.assertNotIn('pr', self.run_state())
+            threads['root'][2] = 't2'
+            codex_session.observe(self.codex(threads), db, 'term-extra', previous, cache)
         self.assertEqual(self.run_state()['pr'], 7)
 
 
