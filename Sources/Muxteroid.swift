@@ -46,6 +46,8 @@ struct Stream: Decodable, Identifiable {
     let agents: [Subagent]
     let tasks: [BeadsTask]
     let links: [WorkstreamLink]
+    let pipeline: Pipeline?
+    let documents: [WorkstreamDocument]
     let provider: String
     let session: String?
     let terminalSocket: String?
@@ -606,7 +608,8 @@ struct Dashboard: View {
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, terminal: selectedTerminal(stream), busy: store.busy) { keepTasksOpen in
+        WorkstreamInspector(stream: stream, terminal: selectedTerminal(stream), busy: store.busy,
+                            clearPipeline: { Task { _ = await store.perform(["pipeline-reset", stream.id]) } }) { keepTasksOpen in
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {

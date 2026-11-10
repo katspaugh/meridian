@@ -11,6 +11,8 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
     private let center = UNUserNotificationCenter.current()
     private let defaultsKey = "presentedAttentionRequests"
     private let log = Logger(subsystem: "local.muxteroid.app", category: "notifications")
+    private var lastPipelinePoll = Date.distantPast
+    private var pipelinePollRunning = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         center.delegate = self
@@ -33,8 +35,28 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         Task {
             while !Task.isCancelled {
                 await store.refresh()
-                if store.loadError.isEmpty { await update(store.rows) }
+                if store.loadError.isEmpty {
+                    await update(store.rows)
+                    pollPipelines()
+                }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
+    }
+
+    /// Asks the bridge to read the pull requests of runs that wait on GitHub, about once a minute.
+    /// The poll runs on its own, so a slow `gh` never delays the refresh, and never overlaps the last one.
+    private func pollPipelines() {
+        let ids = store.rows.filter { $0.pipeline?.polling == true }.map(\.id)
+        guard !ids.isEmpty, !pipelinePollRunning, Date().timeIntervalSince(lastPipelinePoll) >= 60 else { return }
+        lastPipelinePoll = Date()
+        pipelinePollRunning = true
+        Task {
+            defer { pipelinePollRunning = false }
+            do {
+                _ = try await Bridge.run(["pipeline-poll"] + ids)
+            } catch {
+                log.error("Unable to poll pull requests: \(error.localizedDescription)")
             }
         }
     }
