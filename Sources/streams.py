@@ -436,12 +436,19 @@ def streams():
         priority = {"Needs you": 0, "Working": 1, "Review": 2, "Ready": 3, "Queued": 4, "Offline": 5}
         representative = min(entries, key=lambda t: priority.get(t['state'], 6)) if entries else dict(state='Ready', detail='Add a terminal to continue this workstream.')
         state, detail = representative['state'], representative['detail']
+        meta = issue["metadata"]
+        stream_agents = [a for t in entries for a in t['agents']]
+        pipeline_view, documents = tracker.guarded(
+            db, (None, []), tracker.snapshot, db, key, meta.get("worktreeRoot") or meta["folder"],
+            created=tracker.timestamp(issue.get("created_at") or ""), own_worktree=bool(meta.get("worktreeRoot")),
+            closed=issue["status"] == "closed", waiting=state in ("Needs you", "Review"),
+            active_agents=sum(1 for a in stream_agents if a.get("state") in ("Working", "Needs you")), now=time.time())
         if issue["status"] == "closed":
             state = "Done"
         rows.append(dict(id=key, terminalSocket=str(TERMINALS / key) if key in attached else None, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
                          sourceFolder=issue["metadata"].get("sourceFolder"), worktreeBranch=issue["metadata"].get("worktreeBranch"),
                          reference=issue.get("external_ref") or "", state=state, detail=detail, live=any(t['live'] for t in entries), tasks=children.get(key, []), links=artifacts.get(key, []),
-                         agents=[a for t in entries for a in t['agents']], terminals=entries,
+                         agents=stream_agents, terminals=entries, pipeline=pipeline_view, documents=documents,
                          session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
     return rows
 

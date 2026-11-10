@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
@@ -203,6 +204,161 @@ class TrackerTests(unittest.TestCase):
         for t in threads: t.start()
         for t in threads: t.join()
         self.assertEqual(self.run_state()['count'], 8)
+
+    def test_list_rows_carry_pipeline_and_documents(self):
+        row = streams.streams()[0]
+        self.assertEqual((row['pipeline'], row['documents']), (None, []))
+        self.post('mx-example', 'Write', {'file_path': str(self.plan_file())})
+        with streams.database() as db:
+            db.execute("UPDATE activity SET state='Review' WHERE id IN ('mx-example','term-extra')")
+        row = streams.streams()[0]
+        self.assertEqual((row['pipeline']['name'], row['pipeline']['needsYou']), ('demo', True))
+        self.assertEqual(row['documents'][0]['title'], 'Demo Implementation Plan')
+        self.parent['status'] = 'closed'
+        self.assertTrue(streams.streams()[0]['pipeline']['frozen'])
+
+    def test_a_failing_snapshot_leaves_the_list_working(self):
+        with patch.object(tracker, 'guarded', self.real_guarded), patch.object(tracker.trace, 'error') as error, \
+                patch.object(tracker, 'snapshot', side_effect=RuntimeError('boom')):
+            row = streams.streams()[0]
+        error.assert_called_once()
+        self.assertEqual((row['id'], row['pipeline'], row['documents']), ('mx-example', None, []))
+
+
+class SnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.repo = self.root / 'source repo'
+        self.repo.mkdir()
+        home = self.root / 'app home'
+        home.mkdir()
+        self.git('init', '-b', 'main')
+        self.git('config', 'user.name', 'Test')
+        self.git('config', 'user.email', 'test@example.invalid')
+        self.write('docs/superpowers/specs/2026-01-01-old-design.md', '# Old\n')
+        self.git('add', '.')
+        self.git('-c', 'commit.gpgsign=false', 'commit', '-m', 'Initial')
+        # The list's guard would hide a tracker that raises; these tests must see it.
+        passthrough = lambda db, default, function, *args, **kwargs: function(*args, **kwargs)
+        for p in [patch.object(streams, 'ROOT', home), patch.object(tracker, 'guarded', side_effect=passthrough)]:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def snap(self, root=None, now=2_000_000_000.0, **options):
+        settings = dict(created=0.0, own_worktree=True, closed=False, waiting=False, active_agents=0)
+        settings.update(options)
+        with streams.database() as db:
+            return tracker.snapshot(db, 'mx-s', str(root or self.repo), now=now, **settings)
+
+    def write(self, relative, text, root=None):
+        path = (root or self.repo) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def test_plain_workstream_has_nothing(self):
+        self.assertEqual(self.snap(), (None, []))
+
+    def test_untracked_documents_belong_and_merged_ones_do_not(self):
+        spec = self.write('docs/superpowers/specs/2026-11-10-new-design.md', '# New thing\n')
+        self.write('docs/superpowers/specs/2026-11-09-theirs-design.md', '# Theirs\n')
+        self.git('add', 'docs/superpowers/specs/2026-11-09-theirs-design.md')
+        self.git('-c', 'commit.gpgsign=false', 'commit', '-m', 'From main')
+        view, documents = self.snap()
+        self.assertEqual(documents, [{'kind': 'spec', 'title': 'New thing', 'path': str(spec)}])
+        self.assertEqual((view['name'], view['phases'][0]['mark']), ('new', 'running'))
+        self.git('add', '.'); self.git('-c', 'commit.gpgsign=false', 'commit', '-m', 'Mine')
+        self.assertEqual(self.snap()[1][0]['path'], str(spec))      # stays after it is committed
+        spec.unlink()
+        self.assertEqual(self.snap()[1], [])
+
+    def test_gitignored_documents_still_belong(self):
+        self.write('.gitignore', 'docs/superpowers/\n')
+        self.write('docs/superpowers/plans/2026-11-10-a.md', '# A Plan\n')
+        self.assertEqual([d['title'] for d in self.snap()[1]], ['A Plan'])
+
+    def test_git_failure_adopts_nothing_and_is_retried(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        with patch.object(tracker.subprocess, 'run', side_effect=subprocess.TimeoutExpired('git', 4)):
+            self.assertEqual(self.snap(), (None, []))
+        self.assertEqual(len(self.snap()[1]), 1)
+
+    def test_plan_then_ledger_then_a_second_run(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        self.snap(now=100.0)
+        plan = self.write('docs/superpowers/plans/2026-11-10-a.md', '# A Plan\n### Task 1: One\n### Task 2: Two\n')
+        view, documents = self.snap(now=200.0)
+        self.assertEqual([d['kind'] for d in documents], ['plan', 'spec'])
+        self.assertEqual([p['mark'] for p in view['phases'][:2]], ['done', 'running'])
+        self.write('.superpowers/sdd/2026-11-10-a/plan-path', 'docs/superpowers/plans/2026-11-10-a.md\n')
+        self.write('.superpowers/sdd/2026-11-10-a/progress.md', '# SDD ledger\nTask 1: complete\n')
+        view, _ = self.snap(now=300.0)
+        tasks = next(p for p in view['phases'] if p['id'] == 'execute')['tasks']
+        self.assertEqual([t['mark'] for t in tasks], ['done', 'running'])
+        with streams.database() as db:
+            tracker.update(db, 'mx-s', lambda run: pipeline.complete_phase(run, 'merge', 400.0))
+        plan.write_text(plan.read_text() + '\n### Task 3: Three\n')            # editing an old plan starts nothing
+        self.assertEqual(self.snap(now=500.0)[0]['finished'], 'merged')
+        self.write('docs/superpowers/plans/2026-11-12-b.md', '# B Plan\n### Task 1: One\n')
+        view, documents = self.snap(now=600.0)
+        self.assertEqual((view['name'], view['startedAt'], view['finished'], len(documents)), ('b', 600.0, None, 3))
+
+    def test_shared_folder_takes_only_documents_newer_than_the_workstream(self):
+        plain = self.root / 'plain folder'
+        old = self.write('docs/superpowers/specs/old-design.md', '# Old\n', root=plain)
+        os.utime(old, (1000.0, 1000.0))
+        new = self.write('docs/superpowers/specs/new-design.md', '# New\n', root=plain)
+        os.utime(new, (3000.0, 3000.0))
+        _, documents = self.snap(root=plain, created=2000.0, own_worktree=False)
+        self.assertEqual([d['title'] for d in documents], ['New'])
+
+    def test_completed_workstream_is_frozen_and_not_scanned(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        self.snap(waiting=True)
+        self.write('docs/superpowers/plans/2026-11-10-a.md', '# A Plan\n### Task 1: One\n')
+        view, documents = self.snap(closed=True, waiting=True)
+        self.assertEqual((view['frozen'], view['needsYou'], len(documents)), (True, False, 1))
+
+    def test_unreadable_entries_do_not_break_the_scan(self):
+        (self.repo / 'docs/superpowers/plans/dir.md').mkdir(parents=True)
+        (self.repo / 'docs/superpowers/plans/bad.md').write_bytes(b'\xff\xfe')
+        self.assertEqual(self.snap(), (None, []))
+
+    def test_unchanged_files_cost_no_subprocess(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        self.snap()
+        with patch.object(tracker.subprocess, 'run', side_effect=AssertionError('git called')):
+            self.assertEqual(len(self.snap()[1]), 1)
+
+    def test_an_unchanged_refresh_writes_nothing(self):
+        self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+        self.write('docs/superpowers/plans/2026-11-10-a.md', '# A Plan\n### Task 1: One\n### Task 2: Two\n')
+        self.write('.superpowers/sdd/2026-11-10-a/plan-path', 'docs/superpowers/plans/2026-11-10-a.md\n')
+        self.write('.superpowers/sdd/2026-11-10-a/progress.md', '# SDD ledger\nTask 1: complete\n')
+        first = self.snap()
+        self.assertEqual(len(next(p for p in first[0]['phases'] if p['id'] == 'execute')['tasks']), 2)
+        statements = []
+        with patch.object(tracker, 'update', side_effect=AssertionError('run updated')), \
+                patch.object(tracker.subprocess, 'run', side_effect=AssertionError('git called')), \
+                streams.database() as db:
+            db.set_trace_callback(statements.append)
+            second = tracker.snapshot(db, 'mx-s', str(self.repo), created=0.0, own_worktree=True, closed=False,
+                                      waiting=False, active_agents=0, now=2_000_000_000.0)
+            self.assertFalse(db.in_transaction)
+            db.set_trace_callback(None)
+        self.assertEqual(second, first)
+        self.assertTrue(statements)
+        self.assertEqual([s for s in statements if not s.lstrip().upper().startswith('SELECT')], [])
+
+    def test_timestamp(self):
+        self.assertEqual(tracker.timestamp('2026-11-10T05:41:25Z'), 1794289285.0)
+        self.assertEqual(tracker.timestamp(''), 0.0)
 
 
 class ErrorLogTests(unittest.TestCase):

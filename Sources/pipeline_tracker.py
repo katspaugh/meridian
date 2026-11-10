@@ -4,10 +4,12 @@ Hooks run concurrently with each other and with list, so every
 read-modify-write of a run goes through update, which holds the database
 write lock from the read until the commit.
 """
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 
 import pipeline
 import workstream_log as trace
@@ -16,7 +18,9 @@ DOCUMENTS = (
     ("spec", re.compile(r"/docs/superpowers/specs/[^/]+\.md$")),
     ("plan", re.compile(r"/docs/superpowers/plans/[^/]+\.md$")),
 )
+DOCUMENT_FOLDERS = (("spec", "docs/superpowers/specs"), ("plan", "docs/superpowers/plans"))
 WORKSPACE_SUFFIX = re.compile(r"/\.superpowers/sdd/[^/]+$")
+ISO_TIME = re.compile(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$")
 
 
 def initialize(db):
@@ -161,6 +165,137 @@ def command_event(db, key, command, output, now):
     text = _read(plan_path) if plan_path else None
     parsed = pipeline.parse_plan_tasks(text) if text is not None else []
     update(db, stream, lambda run: pipeline.attach_workspace(run, workspace, plan_path, parsed, now))
+
+
+def timestamp(text):
+    """An ISO time such as 2026-11-10T05:41:25Z as epoch seconds, 0.0 when it cannot be parsed."""
+    match = ISO_TIME.match(text.strip()) if isinstance(text, str) else None
+    if match is None:
+        return 0.0
+    zone = match.group(8) or "Z"
+    try:
+        offset = timedelta(0)
+        if zone != "Z":
+            digits = zone[1:].replace(":", "")
+            offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+            offset = offset if zone[0] == "+" else -offset
+        moment = datetime(*(int(part) for part in match.groups()[:6]), tzinfo=timezone(offset))
+        return moment.timestamp() + float("0." + (match.group(7) or "0"))
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+def _listing(root):
+    """{path: (kind, stat)} for the regular Markdown files in the two document folders."""
+    found = {}
+    for kind, folder in DOCUMENT_FOLDERS:
+        try:
+            with os.scandir(os.path.join(root, folder)) as entries:
+                for entry in entries:
+                    try:
+                        if entry.name.endswith(".md") and entry.is_file():
+                            found[entry.path] = kind, entry.stat()
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return found
+
+
+def _untracked(root, candidates, own_worktree):
+    """The candidates Git does not track (ignored ones included), or None when Git cannot answer."""
+    try:
+        result = subprocess.run(["git", "-C", root, "ls-files", "-z", "--others", "--",
+                                 *(folder for _, folder in DOCUMENT_FOLDERS)],
+                                capture_output=True, encoding="utf-8", errors="replace", timeout=4,
+                                env=dict(os.environ, LC_ALL="C"))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        # A folder used directly that is not a repository has nothing tracked.
+        if not own_worktree and "not a git repository" in result.stderr:
+            return set(candidates)
+        return None
+    named = {os.path.join(root, line) for line in result.stdout.split("\0") if line}
+    return {path for path in candidates if path in named}
+
+
+def _scan(db, stream, root, created, own_worktree, now):
+    listing = _listing(root)
+    signature = json.dumps(sorted([path, stat.st_mtime_ns] for path, (_, stat) in listing.items()))
+    stored = db.execute("SELECT signature FROM pipeline_scans WHERE stream=?", (stream,)).fetchone()
+    if signature == (stored[0] if stored else "[]"):
+        return
+    known = dict(db.execute("SELECT path,mtime FROM pipeline_docs WHERE stream=?", (stream,)))
+    candidates = [path for path in listing if path not in known]
+    adopted = _untracked(root, candidates, own_worktree) if candidates else set()
+    if adopted is not None and not own_worktree:
+        adopted = {path for path in adopted if listing[path][1].st_mtime > created}
+    changed = {path for path in listing if path in known and listing[path][1].st_mtime != known[path]}
+    for path in sorted((adopted or set()) | changed, key=lambda path: listing[path][1].st_mtime):
+        record_document(db, stream, listing[path][0], path, now)
+    # When Git could not answer, the next refresh asks again.
+    if adopted is not None:
+        db.execute("INSERT OR REPLACE INTO pipeline_scans VALUES (?,?)", (stream, signature))
+        db.commit()
+
+
+def _poll_ledger(db, stream, root, now):
+    run = load(db, stream)
+    if run is None or pipeline.is_finished(run):
+        return
+    workspace = run.get("workspace")
+    if not workspace:
+        if not run.get("planPath"):
+            return
+        workspace = os.path.join(root, ".superpowers", "sdd", re.sub(r"\.md$", "", os.path.basename(run["planPath"])))
+        if not os.path.isfile(os.path.join(workspace, "plan-path")):
+            return
+    ledger = os.path.join(workspace, "progress.md")
+    try:
+        mtime = os.stat(ledger).st_mtime
+    except OSError:
+        return
+    if mtime == run.get("ledgerMtime"):
+        return
+    text = _read(ledger)
+    if text is None:
+        return
+
+    def change(run):
+        if run is None or pipeline.is_finished(run):
+            return run
+        pipeline.advance_to(run, "execute", now)
+        pipeline.apply_ledger(run, text, now)
+        run["workspace"] = workspace
+        run["ledgerMtime"] = mtime
+        return run
+    update(db, stream, change)
+
+
+def _documents(db, stream):
+    rows = db.execute("SELECT path,kind,title FROM pipeline_docs WHERE stream=? ORDER BY mtime DESC,path",
+                      (stream,)).fetchall()
+    gone = {path for path, _, _ in rows if not os.path.exists(path)}
+    if gone:
+        db.executemany("DELETE FROM pipeline_docs WHERE stream=? AND path=?", [(stream, path) for path in gone])
+        db.commit()
+    return [{"kind": kind, "title": title, "path": path} for path, kind, title in rows if path not in gone]
+
+
+def snapshot(db, stream, root, *, created, own_worktree, closed, waiting, active_agents, now):
+    """The rendered run (or None) and the documents, newest first.
+
+    A refresh in which no file changed only reads: list runs every three
+    seconds for every workstream while hooks contend for the write lock.
+    """
+    if not closed:
+        _scan(db, stream, root, created, own_worktree, now)
+        _poll_ledger(db, stream, root, now)
+    documents = _documents(db, stream)
+    run = load(db, stream)
+    view = pipeline.render(run, now, waiting, active_agents, frozen=closed) if run is not None else None
+    return view, documents
 
 
 def guarded(db, default, function, *args, **kwargs):
