@@ -65,8 +65,8 @@ Everything else in this document is the author's call (Claude), accepted by the 
 │ (Beads tasks and reply, as now)  │
 ```
 
-- **Placement (Call).** The Pipeline section sits at the top of the inspector, above Tasks, and can be collapsed; the collapsed state is remembered. The footer (state, folder, branch, Mark complete) stays fixed as it is now. The mockup fixes the order; whether the Tasks header scrolls with the content is left to the builder.
-- **Header.** Run name (derived from the plan or spec file name), time since the run started, and one summary line: "about N to go → merged ≈ HH:MM" while there is an estimate, "ETA once the plan lists its tasks" before that, "merged HH:MM" or "PR closed without merging" at the end. When subagents are working, say how many.
+- **Placement (Call).** The Pipeline section sits at the top of the inspector, above Tasks, and can be collapsed; the collapsed state is remembered. Its header has a context menu with Clear Pipeline (see "When a run ends or goes quiet"). The footer (state, folder, branch, Mark complete) stays fixed as it is now. The mockup fixes the order; whether the Tasks header scrolls with the content is left to the builder.
+- **Header.** Run name (derived from the plan or spec file name), time since the run started, and one summary line: "about N to go → merged ≈ HH:MM" while there is an estimate, "No estimate yet" when there is none, "merged HH:MM" or "PR closed without merging" at the end. When subagents are working, say how many.
 - **Phase rows.** One per phase that was not skipped: status mark, label, the time it finished (or `≈` an estimated finish), and a short detail: the task count for plan, `#123` for PR (a link to the PR), the check summary for CI ("5 of 12 checks", "2 of 12 failing", "12 passed").
 - **Task rows** under the tasks phase: number, title, two boxes for implement and review, the fix round (`r2`) while a task is in a fix loop, and its time.
 - **Marks:** done, running, slow (running well past its estimate), failed, to come, and needs you. Use the app's existing state colours (`stateColor`) where they fit; "needs you" is orange like elsewhere in the app.
@@ -99,8 +99,9 @@ Muxteroid already registers a `PostToolUse` command hook with no matcher for eve
   - `superpowers:verification-before-completion` → verify, only once every task is done.
   - `superpowers:finishing-a-development-branch` → pr, only once execute has started.
 - **Write / Edit** (`tool_input.file_path`):
-  - `…/docs/superpowers/specs/*.md` → the run's spec; the file is this workstream's document.
-  - `…/docs/superpowers/plans/*.md` → the run's plan; parse its tasks, advance to plan, name the run after the plan; the file is this workstream's document.
+  - `…/docs/superpowers/specs/*.md` → the file is this workstream's document, and the run's spec; the run is named after it until there is a plan.
+  - `…/docs/superpowers/plans/*.md` → the file is this workstream's document, and the run's plan: parse its tasks, advance to plan, name the run after the plan.
+  - Whether such a write starts a new run follows the rule under "Events from files".
 - **Bash** (`tool_input.command`, output from `tool_response`):
   - `sdd-workspace` in the command and a `…/.superpowers/sdd/<slug>` path in the output → that is the run's workspace. Read its `plan-path` marker (repo-relative or absolute), parse that plan, advance to execute. If it names a different plan than the current run and that run has started executing, start a new run.
   - `task-brief <plan> N` → task N starts (implement running) and becomes the current task.
@@ -109,18 +110,23 @@ Muxteroid already registers a `PostToolUse` command hook with no matcher for eve
   - `gh pr merge` without `--auto`, naming this PR or no number → merge done.
 - **Call:** a successful GitHub MCP `create_pull_request` counts the same as `gh pr create` when its result contains a PR URL.
 
-Plan tasks are headings of the form `## Task N: Title` (two to four `#`), outside code fences; duplicates of a number are ignored.
+Plan tasks are headings outside code fences that match the mod's pattern `^#{2,4}\s+Task\s+(\d+)\s*[:.–—-]?\s*(.*)$`: two to four `#`, then `Task N`, then an optional colon, full stop, hyphen or dash, then the title. `*`, `_` and backticks are stripped from the title, an empty title becomes "Task N", and a repeated number is ignored.
 
 ### Events from files
 
 These run during the regular `list` refresh and must stay at the cost of a few `stat` calls unless something changed.
 
 - **Ledger.** `<workspace>/progress.md`, where the workspace is the one recorded on the run or `<root>/.superpowers/sdd/<plan file name without .md>` if its `plan-path` marker exists. Re-read only when its modification time changes. `Task N: complete` marks the task done; `Task N: fix round R` records the round. When every task is done and execute is running, execute is done.
-- **Documents.** See the next section. A spec or plan found by the scan is applied to the run the same way as a hook-observed write, and **starts a run if there is none** (Call), so a Codex-only workstream gets a timeline from files alone: a spec gives a running brainstorm, a plan moves it to plan with its tasks, a ledger moves it to tasks.
+- **Documents.** See "Which documents belong to a workstream". A spec or plan found by the scan is applied to the run by the same rule as a hook-observed write (Call):
+  - A document **not seen before** in this workstream starts a new run when there is no run, when the current run is finished, or when the current run has started executing and the document is not its own spec or plan. It is then applied: a spec gives a running brainstorm, a plan moves the run to plan with its tasks.
+  - A document **seen before** is applied only if it is the current run's plan (its tasks are re-read). Editing an older document never starts a run.
+  - When a scan finds several new documents, they are applied oldest first.
+
+  This is what gives a Codex-only workstream a timeline from files alone, and a second timeline after the first run is merged.
 
 ### Events from Codex
 
-Codex does not report skill use. `codex_session.observe` already hands each finished turn's successful shell commands to `links.tool_result`; hand them to the pipeline's Bash handling too. Combined with the file scan this gives Codex the documents, the task progress, and PR detection, but phase changes arrive at the end of a turn and review/verify may be skipped over. That coarseness is accepted.
+Codex does not report skill use. `codex_session.observe` already hands each finished turn's successful shell commands to `links.tool_result`; hand the **root thread's** commands to the pipeline's Bash handling too. Commands from child threads are subagents' and are ignored, as for Claude. Combined with the file scan this gives Codex the documents, the task progress, and PR detection, but phase changes arrive at the end of a turn and review/verify may be skipped over. That coarseness is accepted.
 
 ### PR and CI
 
@@ -138,17 +144,35 @@ Codex does not report skill use. `codex_session.observe` already hands each fini
 - A running step is "slow" once it has run more than 1.5 times its estimate.
 - Remaining steps are laid end to end from now; a running step ends no earlier than a minute from now.
 
-**Call:** the mod treats a run older than 24 hours as stale and ignores further events. Muxteroid does not: a workstream can run for days, and the run belongs to the workstream, so it stays live until it is merged, closed, or replaced.
+### Runs without per-task signals
+
+Per-task progress comes only from the subagent-driven flow's `sdd-workspace`, `task-brief` and `review-package` commands and its `progress.md` ledger (Superpowers 7). Inline `executing-plans`, older versions, and Codex without a ledger do not produce them. For those runs (Call):
+
+- A task is inferred to be the active one only when the run has a workspace or some task has already started. Otherwise every task row shows as to come, the tasks phase shows as running and is never slow, and there is no finish estimate; the summary line reads "No estimate yet".
+- The run still moves on: `finishing-a-development-branch`, `gh pr create` and the PR checks advance it without waiting for tasks. Final review and verify stay gated on every task being done, so they are skipped in these runs.
+- Once the tasks phase is done, tasks that were never individually completed are drawn as done, without times.
+
+### When a run ends or goes quiet
+
+**Call:** the mod treats a run older than 24 hours as stale and ignores further events. Muxteroid does not: a workstream can run for days, and the run belongs to the workstream, so it stays live until it is merged, closed, replaced, or cleared.
+
+A run can stop short of merged: a branch finished without a PR, an abandoned brainstorm, a PR left open. Two things bound that (Call):
+
+- **Mark complete freezes the run.** For a completed workstream the timeline shows what happened and nothing else: no needs-you or slow marks, no estimates, and its PR is no longer polled. Completed workstreams are not scanned for documents and never get a new run. Reopening the workstream brings the run back to life.
+- **Clear Pipeline.** A context-menu item on the section header removes the workstream's run (the app's version of the mod's `/pipeline reset`). The documents stay listed; the timeline returns when a new run starts.
 
 ## Which documents belong to a workstream
 
-**Call:** only documents written or changed in this workstream. A document belongs if any of these holds:
+**Call:** only documents created in this workstream. A file under `docs/superpowers/specs` or `docs/superpowers/plans` belongs if either holds:
 
-1. A Write or Edit to it was observed from one of the workstream's Claude terminals.
-2. The workstream has its own worktree, and the file under `docs/superpowers/specs` or `docs/superpowers/plans` at the worktree root is untracked or differs from the commit the workstream's branch was created from. New workstreams should record that commit in their metadata; for existing ones the builder may fall back to the oldest reflog entry of the workstream's branch, and skip this rule if neither is available.
-3. The workstream uses a folder directly (no worktree), and the file was modified after the workstream was created.
+1. A Write or Edit to it was observed from one of the workstream's Claude terminals (any path, also outside the scanned directories' root).
+2. A scan found it **untracked by Git** (or the folder is not a Git repository), and, for a workstream that uses a folder directly instead of its own worktree, modified after the workstream was created.
 
-Scan from the worktree root (`worktreeRoot` in the stream's metadata), not from `folder`, because a workstream can live in a subfolder; fall back to `folder` when there is no worktree. Rescan only when a watched directory or a known document changes (modification times), and drop documents whose files are gone.
+Once a document belongs it stays listed for as long as the file exists, including after it is committed.
+
+Untracked is the test on purpose. Comparing against the commit the branch started from would also pick up other people's specs after a merge or rebase from the main branch, and a pull in a shared checkout would do the same to a modification-time test; neither produces untracked files. The cost is accepted: a document that a Codex terminal both creates and commits while Muxteroid is not running is missed. Workstreams that share one plain folder also share its new documents.
+
+Scan from the worktree root (`worktreeRoot` in the stream's metadata), not from `folder`, because a workstream can live in a subfolder; fall back to `folder` when there is no worktree. Rescan only when the listing or modification times of the two directories' Markdown files change, and drop documents whose files are gone.
 
 ## Data handed to the app
 
@@ -164,14 +188,14 @@ Each stream in the `list` output gains two fields: the pipeline (absent when the
 - `list` runs every three seconds while holding `bridge.lock`. No network and no subprocess per refresh unless something changed.
 - Hooks run concurrently with `list` and with each other, and do not take `bridge.lock`. Every read-modify-write of a run must be atomic in SQLite (for example `BEGIN IMMEDIATE`), or events will be lost.
 - State lives in `activity.sqlite` beside the existing tables, created on demand like the others, so existing installations upgrade without a migration step.
-- Terminals that were started before this version keep working: their hooks call the bridge script by path, so they pick up the new behaviour as soon as the bundle is rebuilt in place.
+- Terminals that were started before this version keep working. Claude terminals call the bridge script by path on every hook, so they pick up the new behaviour as soon as the bundle is rebuilt in place. A running Codex terminal is a long-lived bridge process with the old code loaded: until it is restarted it feeds no commands to the pipeline, and only the file scan reaches it.
 - A new Python file must be added to both the copy list in `build.sh` and the `exclude` list in `Package.swift`.
 - The README documents every feature in its "Working across streams" list; add this one, in the same voice.
 
 ## Testing
 
-- Python unit tests in `Tests/` in the existing style (`MUXTEROID_HOME` pointed at a temporary directory, `bd` and terminals patched). Cover: phase transitions and the new-run rules; plan parsing; Skill, Write, Bash events with realistic payloads; subagent events ignored; the ledger; the PR view classification; estimates; document ownership for a worktree stream and a plain folder; a files-only (Codex) run; concurrent updates not losing an event. The mod's `tests/model.test.ts` is a good source of cases.
-- `swift build` passes and the app is checked by hand against a scratch `MUXTEROID_HOME`, not the live data directory: no section for a plain workstream; a section that fills in as a run proceeds; a document window that opens and follows edits.
+- Python unit tests in `Tests/` in the existing style (`MUXTEROID_HOME` pointed at a temporary directory, `bd` and terminals patched). Cover: phase transitions and the new-run rules; plan parsing; Skill, Write, Bash events with realistic payloads; subagent events ignored; the ledger; the PR view classification; estimates, including a run without task signals; document ownership for a worktree stream (tracked files from a merge excluded) and a plain folder; a files-only (Codex) run and its second run; a completed workstream; clearing a run; concurrent updates not losing an event. The mod's `tests/model.test.ts` is a good source of cases.
+- `swift build` passes and the app is checked by hand against a scratch `MUXTEROID_HOME`, not the live data directory: no section for a plain workstream; a section that fills in as a run proceeds; Clear Pipeline; a document window that opens and follows edits.
 
 ## Left to the builder
 
