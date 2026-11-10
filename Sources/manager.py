@@ -11,6 +11,7 @@ import uuid
 
 import manager_brain as brain
 import manager_store as store
+import workstream_log
 
 Outcome = collections.namedtuple("Outcome", "output state detail")
 NOTHING = Outcome(None, None, None)
@@ -85,10 +86,12 @@ def review(bridge, key, sid, event):
         return NOTHING
     tool, tool_input = event.get("tool_name") or "", event.get("tool_input") or {}
     subagent = bool(event.get("agent_id"))
-    if name == "PostToolUse":
+    if name in ("PostToolUse", "PostToolUseFailure"):
         # Approvals are one-off: once the approved action has run, it needs a fresh review.
         with transaction(bridge) as db:
             store.revoke(db, key, tool, tool_input)
+            if not subagent:
+                store.resolve_asks(db, terminal=key)  # The agent has moved on.
         return NOTHING
     trigger = REVIEWED_TOOLS.get(tool) if name == "PreToolUse" else TRIGGERS.get(name)
     if name == "PreToolUse" and trigger is None:
@@ -107,6 +110,9 @@ def review(bridge, key, sid, event):
             return status(Outcome(permission({"behavior": "allow"}), "Working", APPROVED), subagent)
         if trigger == "denied" and store.approved(db, key, tool, tool_input):
             return Outcome(RETRY, None, None)
+        # The boss chose to have the manager review permission prompts only in auto mode.
+        if trigger == "permission" and event.get("permission_mode") != "auto":
+            return NOTHING
         if trigger == "stop" and store.nudges(db, key) >= store.MAX_NUDGES:
             store.open_ask(db, stream, key, STUCK, [], "")
             return Outcome(None, "Needs you", STUCK)
@@ -121,6 +127,7 @@ def review(bridge, key, sid, event):
     row = next((r for r in rows if r.get("id") == stream), {})
     # The interim line has been written; a denial with no decision must still clear it.
     fallback = status(Outcome(None, "Working", CONTINUING), subagent) if trigger == "denied" else NOTHING
+    workstream_log.begin("manager-review", key)
     reply = brain.consult(bridge.ROOT, trigger, _context(bridge, key, event, trigger, stream, rows),
                           investigate=trigger == "stop", timeout=270 if trigger == "stop" else 150,
                           folders=[row["folder"]] if row.get("folder") else [])
@@ -130,12 +137,13 @@ def review(bridge, key, sid, event):
     decisions = reply.get("decisions")
     decisions = [d for d in decisions if isinstance(d, dict)] if isinstance(decisions, list) else []
     with transaction(bridge) as db:
+        if store.paused(db):
+            return fallback  # Paused while the consult ran.
         outcome = verdict_outcome(db, key, stream, trigger, verdict, summary, message, reply, tool, tool_input)
         if outcome is None:
             return fallback
         if trigger != "stop" or verdict != "stop" or decisions:
             store.record_event(db, stream, key, trigger, verdict, summary, {"message": message, "decisions": decisions})
-    remember(bridge, reply)
     return status(fallback if outcome == NOTHING else outcome, subagent)
 
 
@@ -221,10 +229,11 @@ def _context(bridge, key, event, trigger, stream, rows):
     tool = event.get("tool_name") or ""
     parts = [f"# Trigger: {trigger}\n" + SITUATIONS[trigger].format(tool=tool) + "\n"
              + f"You may return: {', '.join(brain.VERDICTS[trigger])}.\n" + FIELDS]
-    workstream = f"# Workstream\nID: {stream}\nFolder: {row.get('folder', '')}"
+    workstream = f"# Workstream\nID: {stream}"
     if not row:
         workstream += "\nThis terminal's workstream was not found."
-    parts.append(workstream + "\nTitle, links and tasks, as written by agents:\n" + untrusted("\n".join(_stream_lines(row))))
+    lines = [f"Folder: {row.get('folder', '')}"] + _stream_lines(row)
+    parts.append(workstream + "\nFolder, title, links and tasks, as written by agents:\n" + untrusted("\n".join(lines)))
     terminals = [f"- {t.get('id', '')}{' (this terminal)' if t.get('id') == key else ''} · {t.get('title', '')} · "
                  f"{t.get('provider', '')} · {t.get('state', '')}" for t in row.get("terminals") or []]
     parts.append(f"# Terminals\nThis terminal: {key}\n" + ("\n".join(terminals) or "(none)"))
@@ -242,8 +251,9 @@ def _context(bridge, key, event, trigger, stream, rows):
     parts.append("# Your recent actions in this workstream\n"
                  + ("\n".join(f"- {t} → {v}: {s}" for t, v, s in events) or "(none)"))
     request = [f"{field}: {value if isinstance(value, str) else json.dumps(value)}"
-               for field in ("tool_name", "tool_input", "reason", "last_assistant_message")
-               for value in [event.get(field)] if value not in (None, "", {})]
+               for field in ("tool_name", "tool_input", "reason", "last_assistant_message", "background_tasks",
+                             "session_crons")
+               for value in [event.get(field)] if value not in (None, "", {}, [])]
     tail = conversation_tail(event.get("transcript_path"))
     parts.append("# The request and the recent conversation\n" + untrusted(
         "Request:\n" + ("\n".join(request) or "(no details)") + "\n\nRecent conversation:\n" + (tail or "(unavailable)")))

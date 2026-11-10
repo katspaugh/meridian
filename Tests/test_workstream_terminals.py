@@ -36,11 +36,14 @@ class WorkstreamTerminalsTests(unittest.TestCase):
             patch.object(streams, "terminals", side_effect=lambda: self.live.copy()),
             patch.object(streams, "legacy_sessions", return_value=set()),
             patch.object(streams.manager, "review", return_value=streams.manager.NOTHING),
+            # begin() writes to the real log folder and turns on tracing for the whole process.
+            patch.object(streams.trace, "begin"),
         ]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)
         self.review = streams.manager.review
+        self.begin = streams.trace.begin
 
     def bd(self, *args):
         if args[0] == "show":
@@ -295,7 +298,8 @@ class WorkstreamTerminalsTests(unittest.TestCase):
             self.assertEqual(self.activity(key), ("Working", "Claude is continuing."))
             self.assertEqual(self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done?"), "")
         consult.assert_called_once()
-        self.assertIn("Title, links and tasks", consult.call_args.args[2])
+        self.begin.assert_called_once_with("manager-review", key)
+        self.assertIn("Folder, title, links and tasks", consult.call_args.args[2])
         self.assertEqual(consult.call_args.kwargs["folders"], [str(self.folder)])
         self.assertEqual(self.activity(key), ("Review", "Done?"))
 
