@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-10-workstream-manager-design.md`
 
+> **After the build:** review and live checks changed several decisions in this plan. The manager has no `git` commands; it types only into idle terminals; permission prompts are reviewed only in auto-mode sessions; notes are saved only from chat; it starts paused; approvals are revoked once the action runs. The spec is updated to match; the code and its tests are the record of the rest.
+
 ## Global Constraints
 
 - Python must run on 3.9: no `X | None` annotations, no `match`, standard library only.
