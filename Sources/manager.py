@@ -428,7 +428,8 @@ def sweep(bridge, exclude=None):
             text = str(ask.get("summary") or "").strip()
             if not text:
                 continue
-            terminal = ask.get("terminal") if ask.get("terminal") in streams[ask["stream"]] else ""
+            terminal = ask.get("terminal") if isinstance(ask.get("terminal"), str) \
+                and ask["terminal"] in streams[ask["stream"]] else ""
             options = ask.get("options")
             options = [str(o) for o in options if str(o).strip()] if isinstance(options, list) else []
             store.open_ask(db, ask["stream"], terminal, text, options, str(ask.get("recommendation") or ""))

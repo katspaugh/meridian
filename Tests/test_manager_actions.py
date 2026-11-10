@@ -310,7 +310,7 @@ class SweepTests(Fixture):
             asks=[{"stream": "w1", "terminal": "c1", "summary": "Ship to production?", "options": ["Ship", "Wait"],
                    "recommendation": "Wait"},
                   {"stream": "w2", "terminal": "t3", "summary": "Which docs host?", "options": [], "recommendation": ""},
-                  {"stream": "w2", "terminal": "t1", "summary": "Merge order?", "options": [], "recommendation": ""},
+                  {"stream": "w2", "terminal": ["t3"], "summary": "Merge order?", "options": [], "recommendation": ""},
                   {"stream": "w1", "terminal": "t1", "summary": "  ", "options": [], "recommendation": ""},
                   {"stream": "ghost", "terminal": "t1", "summary": "Unknown stream?", "options": [], "recommendation": ""}],
             remember=["Boss prefers small PRs."])
