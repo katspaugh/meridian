@@ -23,55 +23,30 @@ struct WorkstreamInspector: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    if stream.pipeline != nil || !stream.documents.isEmpty {
+            if stream.pipeline != nil || !stream.documents.isEmpty {
+                // With a Pipeline section the whole content scrolls, the Tasks header included.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
                         PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline,
                                         open: { openWindow(id: "document", value: URL(fileURLWithPath: $0.path)) })
                         Divider()
-                    }
-                    VStack(alignment: .leading, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 9) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text("Tasks").font(.title3.bold())
-                                Spacer()
-                                if !stream.tasks.isEmpty {
-                                    let done = stream.tasks.filter { $0.status == "closed" }.count
-                                    Text("\(done) of \(stream.tasks.count) done")
-                                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                }
-                            }
-                            if !stream.tasks.isEmpty {
-                                ProgressView(value: Double(stream.tasks.filter { $0.status == "closed" }.count),
-                                             total: Double(stream.tasks.count))
-                                    .progressViewStyle(.linear).tint(.accentColor).accessibilityLabel("Tasks complete")
-                            }
-                        }
-                        VStack(alignment: .leading, spacing: 22) {
-                            if stream.tasks.isEmpty { Text("No tasks yet").foregroundStyle(.secondary) }
-                            ForEach(groups, id: \.self) { status in
-                                taskGroup(status)
-                            }
-                            if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
-                                Divider()
-                                DisclosureGroup(isExpanded: $detailExpanded) {
-                                    Markdown(terminal.detail)
-                                        .markdownTextStyle { FontSize(13) }
-                                        .markdownImageProvider(.asset)
-                                        .markdownInlineImageProvider(.asset)
-                                        .textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.top, 6)
-                                } label: {
-                                    Text(terminal.state == "Review" ? terminal.title + "’s reply" : "Activity").font(.headline)
-                                }
-                            }
+                        VStack(alignment: .leading, spacing: 16) {
+                            tasksHeader
+                            taskList
                         }
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
-            }.frame(maxHeight: .infinity)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                }.frame(maxHeight: .infinity)
+            } else {
+                // Without one the Tasks header stays pinned above the scrolling list.
+                tasksHeader.padding(16)
+                ScrollView {
+                    taskList
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16).padding(.bottom, 16)
+                }.frame(maxHeight: .infinity)
+            }
 
             Divider()
             VStack(alignment: .leading, spacing: 10) {
@@ -109,6 +84,48 @@ struct WorkstreamInspector: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.bar)
+        }
+    }
+
+    private var tasksHeader: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Tasks").font(.title3.bold())
+                Spacer()
+                if !stream.tasks.isEmpty {
+                    let done = stream.tasks.filter { $0.status == "closed" }.count
+                    Text("\(done) of \(stream.tasks.count) done")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+            }
+            if !stream.tasks.isEmpty {
+                ProgressView(value: Double(stream.tasks.filter { $0.status == "closed" }.count),
+                             total: Double(stream.tasks.count))
+                    .progressViewStyle(.linear).tint(.accentColor).accessibilityLabel("Tasks complete")
+            }
+        }
+    }
+
+    private var taskList: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            if stream.tasks.isEmpty { Text("No tasks yet").foregroundStyle(.secondary) }
+            ForEach(groups, id: \.self) { status in
+                taskGroup(status)
+            }
+            if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
+                Divider()
+                DisclosureGroup(isExpanded: $detailExpanded) {
+                    Markdown(terminal.detail)
+                        .markdownTextStyle { FontSize(13) }
+                        .markdownImageProvider(.asset)
+                        .markdownInlineImageProvider(.asset)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 6)
+                } label: {
+                    Text(terminal.state == "Review" ? terminal.title + "’s reply" : "Activity").font(.headline)
+                }
+            }
         }
     }
 

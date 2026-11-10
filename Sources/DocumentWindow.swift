@@ -15,6 +15,9 @@ struct DocumentWindow: View {
                 ScrollView {
                     Markdown(text)
                         .markdownTextStyle { FontSize(14) }
+                        // Bundled images only: opening a document never touches the network.
+                        .markdownImageProvider(.asset)
+                        .markdownInlineImageProvider(.asset)
                         .textSelection(.enabled)
                         .frame(maxWidth: 760, alignment: .leading)
                         .padding(24)
@@ -30,8 +33,9 @@ struct DocumentWindow: View {
             Button("Open in Editor") { NSWorkspace.shared.open(url) }
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         }
-        // ⌘W belongs to the app's Close Terminal command, which is disabled without this value.
+        // ⌘W belongs to the app's close command, which is disabled without this value.
         .focusedSceneValue(\.closeWorkstreamTerminal, { NSApp.keyWindow?.performClose(nil) })
+        .focusedSceneValue(\.closeCommandTitle, "Close Window")
         .task(id: url) {
             var shown: Date?
             var loaded = false

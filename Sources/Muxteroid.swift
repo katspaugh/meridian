@@ -657,15 +657,26 @@ private struct CloseWorkstreamTerminalKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct CloseCommandTitleKey: FocusedValueKey {
+    typealias Value = String
+}
+
 extension FocusedValues {
     var closeWorkstreamTerminal: (() -> Void)? {
         get { self[CloseWorkstreamTerminalKey.self] }
         set { self[CloseWorkstreamTerminalKey.self] = newValue }
     }
+
+    /// The close command's title in a window that closes something other than a terminal.
+    var closeCommandTitle: String? {
+        get { self[CloseCommandTitleKey.self] }
+        set { self[CloseCommandTitleKey.self] = newValue }
+    }
 }
 
 struct TerminalCommands: Commands {
     @FocusedValue(\.closeWorkstreamTerminal) private var closeTerminal
+    @FocusedValue(\.closeCommandTitle) private var closeTitle
 
     var body: some Commands {
         CommandGroup(replacing: .appTermination) {
@@ -673,7 +684,7 @@ struct TerminalCommands: Commands {
                 .keyboardShortcut("q", modifiers: .command)
         }
         CommandGroup(after: .newItem) {
-            Button("Close Terminal") { closeTerminal?() }
+            Button(closeTitle ?? "Close Terminal") { closeTerminal?() }
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(closeTerminal == nil)
         }
