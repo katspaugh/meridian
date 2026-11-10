@@ -711,8 +711,8 @@ struct Dashboard: View {
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
-                if await store.perform(args) != nil {
-                    expanded.insert(stream.state == "Done" ? .active : .done)
+                if await store.perform(args) != nil, reopening {
+                    expanded.insert(.active)
                 }
             }
         }
