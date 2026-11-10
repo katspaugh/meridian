@@ -1,6 +1,7 @@
 """Model one Superpowers run as phases and plan tasks. Times are epoch seconds.
 
-Every function that takes a run mutates it in place and returns it.
+Every function that takes a run mutates it in place and returns it. The event
+rules may instead return a new run, or None when there is no run to report.
 """
 import re
 
@@ -23,6 +24,23 @@ TASK_HEADING = re.compile(r"^#{2,4}\s+Task\s+(\d+)\s*[:.–—-]?\s*(.*)$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 LEDGER_COMPLETE = re.compile(r"\bTask (\d+): complete\b")
 LEDGER_ROUND = re.compile(r"\bTask (\d+): fix round (\d+)")
+
+STARTERS = {
+    "brainstorming": "brainstorm",
+    "writing-plans": "plan",
+    "subagent-driven-development": "execute",
+    "executing-plans": "execute",
+}
+
+PR_URL = re.compile(r'https?://github\.com/[\w.-]+/[\w.-]+/pull/(\d+)')
+SDD_WORKSPACE = re.compile(r"\bsdd-workspace\b")
+WORKSPACE_LINE = re.compile(r"^(/.*/\.superpowers/sdd/[^/\s]+)\s*$")
+TASK_BRIEF = re.compile(r"""\btask-brief["']?\s+(?:"[^"]*"|'[^']*'|\S+)\s+(\d+)""")
+REVIEW_PACKAGE = re.compile(r"\breview-package\b")
+PR_CREATE = re.compile(r"\bgh\s+pr\s+create\b")
+PR_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
+PR_MERGE_AUTO = re.compile(r"--auto\b")
+PR_MERGE_NUMBER = re.compile(r"\bgh\s+pr\s+merge\s+#?(\d+)")
 
 
 def new_run(now):
@@ -193,4 +211,136 @@ def apply_ledger(run, text, now):
 
     if all_tasks_done(run) and run["phases"]["execute"]["status"] == "running":
         complete_phase(run, "execute", now)
+    return run
+
+
+def _is_live(run):
+    return run is not None and not is_finished(run)
+
+
+def skill_event(run, skill, now):
+    name = re.sub(r"^superpowers:", "", skill)
+    starter = STARTERS.get(name)
+    if starter:
+        if not _is_live(run) or (starter != "execute" and has_started(run, "execute")):
+            run = new_run(now)
+        return advance_to(run, starter, now)
+    if not skill.startswith("superpowers:") or not _is_live(run):
+        return run
+    if name == "requesting-code-review" and all_tasks_done(run):
+        advance_to(run, "final-review", now)
+    elif name == "verification-before-completion" and all_tasks_done(run):
+        advance_to(run, "verify", now)
+    elif name == "finishing-a-development-branch" and has_started(run, "execute"):
+        advance_to(run, "pr", now)
+    return run
+
+
+def document_event(run, kind, path, parsed, is_new, now):
+    if not is_new:
+        if _is_live(run) and path == run.get("planPath"):
+            with_plan(run, path, parsed)
+        return run
+    is_own = run is not None and path in (run.get("specPath"), run.get("planPath"))
+    if not _is_live(run) or (has_started(run, "execute") and not is_own):
+        run = new_run(now)
+    if kind == "spec":
+        return advance_to(with_spec(run, path), "brainstorm", now)
+    return advance_to(with_plan(run, path, parsed), "plan", now)
+
+
+def workspace_path(command, output):
+    if not SDD_WORKSPACE.search(command):
+        return None
+    found = None
+    for line in output.split("\n"):
+        match = WORKSPACE_LINE.match(line)
+        if match:
+            found = match.group(1)
+    return found
+
+
+def attach_workspace(run, workspace, plan_path, parsed, now):
+    current_plan = run.get("planPath") if run is not None else None
+    is_other_plan = bool(current_plan) and bool(plan_path) and current_plan != plan_path
+    if not _is_live(run) or (is_other_plan and has_started(run, "execute")):
+        run = new_run(now)
+    if plan_path:
+        with_plan(run, plan_path, parsed)
+    advance_to(run, "execute", now)
+    run["workspace"] = workspace
+    run.pop("ledgerMtime", None)
+    return run
+
+
+def pull_request_created(run, url, now):
+    match = PR_URL.search(url)
+    if not _is_live(run) or match is None:
+        return run
+    advance_to(complete_phase(run, "pr", now), "ci", now)
+    run["pr"] = int(match.group(1))
+    run["prUrl"] = match.group(0)
+    return run
+
+
+def command_event(run, command, output, now):
+    if not _is_live(run):
+        return run
+    brief = TASK_BRIEF.search(command)
+    if brief:
+        return start_task(run, int(brief.group(1)), now)
+    if REVIEW_PACKAGE.search(command):
+        return review_task(run, now)
+    if PR_CREATE.search(command):
+        url = PR_URL.search(output)
+        return pull_request_created(run, url.group(0), now) if url else run
+    if PR_MERGE.search(command) and not PR_MERGE_AUTO.search(command):
+        named = PR_MERGE_NUMBER.search(command)
+        if named is None or int(named.group(1)) == run.get("pr"):
+            complete_phase(run, "merge", now)
+    return run
+
+
+# A JSON null is treated like an absent field.
+def classify_check(check):
+    if not isinstance(check, dict):
+        return "pending"
+    status = check.get("status")
+    conclusion = check.get("conclusion")
+    verdict = conclusion if isinstance(conclusion, str) and conclusion != "" else check.get("state")
+    if status is not None and status != "COMPLETED":
+        return "pending"
+    if verdict in ("SUCCESS", "SKIPPED", "NEUTRAL"):
+        return "pass"
+    if verdict in ("PENDING", "EXPECTED") or verdict is None:
+        return "pending"
+    return "fail"
+
+
+def apply_pr_view(run, view, now):
+    if not isinstance(view, dict):
+        return run
+    state = view.get("state")
+    if state == "MERGED":
+        return complete_phase(run, "merge", now)
+    if state == "CLOSED":
+        return fail_phase(run, "merge", now)
+
+    rollup = view.get("statusCheckRollup")
+    checks = [classify_check(check) for check in rollup] if isinstance(rollup, list) else []
+    failing = checks.count("fail")
+    pending = checks.count("pending")
+    total = len(checks)
+    if failing > 0:
+        fail_phase(run, "ci", now)
+        run["ciDetail"] = "{} of {} failing".format(failing, total)
+        return run
+    if pending > 0 or total == 0:
+        if run["phases"]["ci"]["status"] == "failed":
+            run["phases"]["ci"] = _stamp("todo")
+        advance_to(run, "ci", now)
+        run["ciDetail"] = "waiting for checks" if total == 0 else "{} of {} checks".format(total - pending, total)
+        return run
+    advance_to(complete_phase(run, "ci", now), "merge", now)
+    run["ciDetail"] = "{} passed".format(total)
     return run

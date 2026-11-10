@@ -72,5 +72,119 @@ class RunModelTests(unittest.TestCase):
         self.assertEqual(run['tasks'][1]['implement'], {'status': 'done', 'endedAt': T0 + 9 * MIN})
 
 
+def at_ci():
+    return pipeline.advance_to(planned(), 'ci', T0 + 60 * MIN)
+
+
+def check(status, conclusion):
+    return {'__typename': 'CheckRun', 'status': status, 'conclusion': conclusion}
+
+
+class EventRuleTests(unittest.TestCase):
+    def test_starter_skills_open_and_replace_runs(self):
+        run = pipeline.skill_event(None, 'superpowers:brainstorming', T0)
+        self.assertEqual(run['phases']['brainstorm']['status'], 'running')
+        self.assertIs(pipeline.skill_event(run, 'writing-plans', T0 + MIN), run)
+        self.assertEqual(run['phases']['plan']['status'], 'running')
+        pipeline.skill_event(run, 'superpowers:executing-plans', T0 + 2 * MIN)
+        fresh = pipeline.skill_event(run, 'superpowers:brainstorming', T0 + 3 * MIN)
+        self.assertIsNot(fresh, run)
+        self.assertEqual(fresh['launchedAt'], T0 + 3 * MIN)
+        self.assertIsNone(pipeline.skill_event(None, 'superpowers:requesting-code-review', T0))
+
+    def test_review_and_verify_wait_for_tasks_but_finishing_does_not(self):
+        run = pipeline.advance_to(planned(), 'execute', T0)
+        pipeline.skill_event(run, 'superpowers:requesting-code-review', T0 + MIN)
+        pipeline.skill_event(run, 'superpowers:verification-before-completion', T0 + MIN)
+        self.assertEqual(run['phases']['final-review']['status'], 'todo')
+        self.assertEqual(run['phases']['verify']['status'], 'todo')
+        pipeline.skill_event(run, 'finishing-a-development-branch', T0 + MIN)   # no prefix: ignored
+        self.assertEqual(run['phases']['pr']['status'], 'todo')
+        pipeline.skill_event(run, 'superpowers:finishing-a-development-branch', T0 + 2 * MIN)
+        self.assertEqual(run['phases']['pr']['status'], 'running')
+        self.assertEqual(run['phases']['execute']['status'], 'done')
+
+    def test_new_documents_start_runs_and_old_ones_do_not(self):
+        spec = '/r/docs/superpowers/specs/2026-11-10-foo-design.md'
+        run = pipeline.document_event(None, 'spec', spec, [], True, T0)
+        self.assertEqual((run['name'], run['phases']['brainstorm']['status']), ('foo', 'running'))
+        pipeline.document_event(run, 'plan', PLAN_PATH, pipeline.parse_plan_tasks(PLAN), True, T0 + MIN)
+        self.assertEqual((run['name'], run['phases']['plan']['status'], len(run['tasks'])), ('pipeline-pane', 'running', 3))
+        pipeline.document_event(run, 'plan', PLAN_PATH, [{'n': 1, 'title': 'Only'}], False, T0 + 2 * MIN)
+        self.assertEqual(len(run['tasks']), 1)                       # its own plan is re-read
+        pipeline.advance_to(run, 'execute', T0 + 3 * MIN)
+        other = '/r/docs/superpowers/plans/2026-11-11-bar.md'
+        self.assertIs(pipeline.document_event(run, 'plan', other, [], False, T0 + 4 * MIN), run)   # seen before: ignored
+        self.assertEqual(run['planPath'], PLAN_PATH)
+        fresh = pipeline.document_event(run, 'plan', other, [], True, T0 + 5 * MIN)                 # new, mid-execution
+        self.assertIsNot(fresh, run)
+        self.assertEqual(fresh['name'], 'bar')
+        merged = pipeline.complete_phase(planned(), 'merge', T0)
+        self.assertIs(pipeline.document_event(merged, 'plan', PLAN_PATH, [], False, T0 + MIN), merged)
+        self.assertEqual(merged['phases']['merge']['status'], 'done')
+
+    def test_workspace_and_brief_paths_may_contain_spaces(self):
+        path = '/Users/a/Library/Application Support/Muxteroid/worktrees/abc/.superpowers/sdd/2026-10-09-pipeline-pane'
+        self.assertEqual(pipeline.workspace_path('bash scripts/sdd-workspace docs/p.md', 'note\n' + path + '\n'), path)
+        self.assertIsNone(pipeline.workspace_path('ls', path))
+        self.assertIsNone(pipeline.workspace_path('sdd-workspace x', 'no such plan file: x'))
+        run = pipeline.attach_workspace(None, path, PLAN_PATH, pipeline.parse_plan_tasks(PLAN), T0)
+        self.assertEqual((run['workspace'], run['phases']['execute']['status'], len(run['tasks'])), (path, 'running', 3))
+        pipeline.command_event(run, 'task-brief "/Users/a/Application Support/p.md" 2', '', T0 + MIN)
+        self.assertEqual(run['tasks'][1]['implement']['status'], 'running')
+        pipeline.command_event(run, 'x/review-package docs/p.md a b', '', T0 + 2 * MIN)
+        self.assertEqual(run['tasks'][1]['review']['status'], 'running')
+        pipeline.command_event(run, 'bash "/p q/scripts/task-brief" docs/p.md 3', '', T0 + 3 * MIN)
+        self.assertEqual(run['currentTask'], 3)
+
+    def test_pull_request_commands(self):
+        run = pipeline.advance_to(planned(), 'pr', T0)
+        pipeline.command_event(run, 'gh pr create --fill', 'https://github.com/o/r/pull/12\n', T0 + MIN)
+        self.assertEqual((run['pr'], run['prUrl']), (12, 'https://github.com/o/r/pull/12'))
+        self.assertEqual((run['phases']['pr']['status'], run['phases']['ci']['status']), ('done', 'running'))
+        pipeline.command_event(run, 'gh pr merge 99 --squash', '', T0 + 2 * MIN)
+        pipeline.command_event(run, 'gh pr merge --auto', '', T0 + 2 * MIN)
+        self.assertFalse(pipeline.is_finished(run))
+        pipeline.command_event(run, 'gh pr merge 12 --squash', '', T0 + 3 * MIN)
+        self.assertTrue(pipeline.is_finished(run))
+        self.assertIsNone(pipeline.command_event(None, 'gh pr create', 'https://github.com/o/r/pull/1', T0))
+
+    def test_pending_checks_keep_ci_running_with_a_count(self):
+        run = pipeline.apply_pr_view(
+            at_ci(),
+            {'state': 'OPEN', 'statusCheckRollup': [check('COMPLETED', 'SUCCESS'), check('IN_PROGRESS', '')]},
+            T0 + 61 * MIN)
+        self.assertEqual(run['phases']['ci']['status'], 'running')
+        self.assertEqual(run['ciDetail'], '1 of 2 checks')
+
+    def test_failing_check_fails_ci_and_a_rerun_brings_it_back_to_running(self):
+        failed = pipeline.apply_pr_view(
+            at_ci(),
+            {'state': 'OPEN', 'statusCheckRollup': [check('COMPLETED', 'FAILURE'), check('COMPLETED', 'SUCCESS')]},
+            T0 + 61 * MIN)
+        self.assertEqual(failed['phases']['ci']['status'], 'failed')
+        self.assertEqual(failed['ciDetail'], '1 of 2 failing')
+        rerun = pipeline.apply_pr_view(
+            failed,
+            {'state': 'OPEN', 'statusCheckRollup': [check('QUEUED', ''), check('COMPLETED', 'SUCCESS')]},
+            T0 + 70 * MIN)
+        self.assertEqual(rerun['phases']['ci'], {'status': 'running', 'startedAt': T0 + 70 * MIN})
+
+    def test_green_checks_wait_on_the_merge_and_a_merged_pr_finishes_the_run(self):
+        green = pipeline.apply_pr_view(
+            at_ci(),
+            {'state': 'OPEN', 'statusCheckRollup': [check('COMPLETED', 'SUCCESS'), {'state': 'SUCCESS'}]},
+            T0 + 75 * MIN)
+        self.assertEqual(green['phases']['ci']['status'], 'done')
+        self.assertEqual(green['phases']['merge']['status'], 'running')
+        merged = pipeline.apply_pr_view(green, {'state': 'MERGED', 'statusCheckRollup': []}, T0 + 80 * MIN)
+        self.assertTrue(pipeline.is_finished(merged))
+
+    def test_closed_pull_request_fails_the_merge(self):
+        run = pipeline.apply_pr_view(at_ci(), {'state': 'CLOSED'}, T0 + 61 * MIN)
+        self.assertEqual(run['phases']['merge']['status'], 'failed')
+        self.assertTrue(pipeline.is_finished(run))
+
+
 if __name__ == '__main__':
     unittest.main()
