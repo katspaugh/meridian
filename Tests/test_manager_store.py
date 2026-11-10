@@ -27,6 +27,15 @@ class ManagerStoreTests(unittest.TestCase):
         self.assertFalse(store.approved(self.db, "t2", "Bash", {"command": "npm test"}, now=1))
         self.assertFalse(store.approved(self.db, "t1", "Bash", {"command": "npm test"}, now=601))
 
+    def test_revoke_removes_only_the_matching_approval(self):
+        store.approve(self.db, "t1", "Bash", {"command": "npm test"}, now=0)
+        store.approve(self.db, "t1", "Bash", {"command": "make"}, now=0)
+        store.approve(self.db, "t2", "Bash", {"command": "npm test"}, now=0)
+        store.revoke(self.db, "t1", "Bash", {"command": "npm test"})
+        self.assertFalse(store.approved(self.db, "t1", "Bash", {"command": "npm test"}, now=1))
+        self.assertTrue(store.approved(self.db, "t1", "Bash", {"command": "make"}, now=1))
+        self.assertTrue(store.approved(self.db, "t2", "Bash", {"command": "npm test"}, now=1))
+
     def test_manager_typed_prompt_is_not_the_user(self):
         store.add_nudge(self.db, "t1")
         store.open_ask(self.db, "s1", "t1", "Pick a database", ["Postgres", "SQLite"], "SQLite")

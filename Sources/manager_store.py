@@ -77,6 +77,11 @@ def approved(db, terminal, tool_name, tool_input, now=None):
                       (terminal, fingerprint(tool_name, tool_input), clock(now))).fetchone() is not None
 
 
+def revoke(db, terminal, tool_name, tool_input):
+    db.execute("DELETE FROM manager_approvals WHERE terminal=? AND fingerprint=?",
+               (terminal, fingerprint(tool_name, tool_input)))
+
+
 def allow_consult(db, terminal, now=None):
     now = clock(now)
     db.execute("DELETE FROM manager_consults WHERE time<=?", (now - 3600,))
