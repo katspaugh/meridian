@@ -66,6 +66,38 @@ struct Stream: Decodable, Identifiable {
     var displayState: String { needsAttention ? "Needs you" : state }
 }
 
+extension Stream {
+    private enum CodingKeys: String, CodingKey {
+        case terminals, agents, tasks, links, pipeline, documents, provider, session, terminalSocket
+        case sourceFolder, worktreeBranch, live, nativeView, id, title, folder, reference, state, detail, created
+    }
+
+    /// A pipeline or document list the app cannot read is dropped, so it never fails the stream or the list.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        terminals = try container.decode([WorkstreamTerminal].self, forKey: .terminals)
+        agents = try container.decode([Subagent].self, forKey: .agents)
+        tasks = try container.decode([BeadsTask].self, forKey: .tasks)
+        links = try container.decode([WorkstreamLink].self, forKey: .links)
+        pipeline = (try? container.decodeIfPresent(Pipeline.self, forKey: .pipeline)) ?? nil
+        documents = (try? container.decode([WorkstreamDocument].self, forKey: .documents)) ?? []
+        provider = try container.decode(String.self, forKey: .provider)
+        session = try container.decodeIfPresent(String.self, forKey: .session)
+        terminalSocket = try container.decodeIfPresent(String.self, forKey: .terminalSocket)
+        sourceFolder = try container.decodeIfPresent(String.self, forKey: .sourceFolder)
+        worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
+        live = try container.decode(Bool.self, forKey: .live)
+        nativeView = try container.decode(Bool.self, forKey: .nativeView)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        folder = try container.decode(String.self, forKey: .folder)
+        reference = try container.decode(String.self, forKey: .reference)
+        state = try container.decode(String.self, forKey: .state)
+        detail = try container.decode(String.self, forKey: .detail)
+        created = try container.decode(String.self, forKey: .created)
+    }
+}
+
 func stateColor(_ state: String) -> Color {
     switch state {
     case "Needs you": return .orange
