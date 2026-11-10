@@ -1,6 +1,6 @@
 # Proactive manager: design
 
-Date: 2026-11-10. Status: draft for the owner's review.
+Date: 2026-11-10. Status: draft for the owner's review. Builder check done.
 
 This builds on the workstream manager (`2026-11-10-workstream-manager-design.md`), which is built and shipped. Read that first. Everything it says still holds unless this document changes it.
 
@@ -14,6 +14,7 @@ Their concrete pain was not knowing what is going on. They opened a workstream a
 
 - **Three things the manager should say without being asked:** status updates, what to pick up next, and reminders about things the owner forgot.
 - **Bite-sized only. No walls of text.** This is the most important rule in this document.
+- **When it speaks:** at turn ends only, using the review the manager already runs when an agent stops, plus a few cheap extras. No extra consults while agents work.
 - **Where it speaks:** a fixed slot at the bottom of the inspector (the right-hand Tasks pane), with action buttons. The owner chose this over a floating card and a title-bar line because it never shifts or covers content. Messages the owner has not acted on also collect under **Manager** in the left sidebar.
 - **Learning:** the manager notices instructions the owner repeats in a project and offers to make them standing rules. The owner's example is the definition of done for Muxteroid: push to main, rebuild the app, reinstall it, and relaunch it if needed. The owner keeps asking for this at the end of every task.
 - **Planned steps:** agents write their planned steps into Beads before they start, and the manager asks once if an agent has been working with nothing planned. (The owner first asked to show Claude's own to-do list in the Tasks pane. That list turned out to be unused: across 90 Claude sessions in three days, the built-in to-do tool was called zero times, because agents are told to track their steps in Beads.)
@@ -85,7 +86,7 @@ The **Manager** entry's badge today counts open questions. It now counts unread 
 
 Messages come from two consults the manager already makes, plus two new sweep triggers. No consult is added per agent turn.
 
-- **Stop review (per turn, Claude).** Each time a Claude agent ends its turn, the manager already reviews it. Its reply gains that workstream's status and next messages. This is the main source, because the existing sweep almost never runs for workstreams with only live Claude terminals: its change check (`manager.signature()`) covers only terminals the hooks cannot see. (Call: reuse the Stop review rather than widen the sweep's trigger, which would mean a full consult over every workstream up to every two minutes. The owner can override this if messages feel stale.)
+- **Stop review (per turn, Claude).** Each time a Claude agent ends its turn, the manager already reviews it. Its reply gains that workstream's status and next messages. This is the main source, because the existing sweep almost never runs for workstreams with only live Claude terminals: its change check (`manager.signature()`) covers only terminals the hooks cannot see. The owner decided this: turn ends only. They turned down extra consults while agents work, which would give fresher notes at a quota cost. Mid-run, the Now line is what tells the owner what is happening.
 - **Sweep (all workstreams).** Its reply gains messages too, for every kind and every workstream. It is the only source of reminders and of messages about Codex and stopped terminals.
 
 Each message has:
@@ -97,7 +98,7 @@ Each message has:
 
 What each kind is for:
 
-- **Status:** what moved since the owner last looked. "Tests pass. ~5 min left. Nothing needed from you."
+- **Status:** what moved since the owner last looked. "Bottom-sheet fix done, tests pass. Nothing needed from you."
 - **Next:** the obvious next step when a stream finishes or goes quiet. "PR is green. Merge it?" "Nothing running here; 2 tasks are ready."
 - **Reminder:** something left hanging. A stream untouched for a day with open tasks, a PR waiting on the owner's review, a question an agent asked that nobody answered.
 
