@@ -44,6 +44,9 @@ class WorkstreamTerminalsTests(unittest.TestCase):
             self.addCleanup(p.stop)
         self.review = streams.manager.review
         self.begin = streams.trace.begin
+        # hook() installs handlers in this process; put the runner's own back afterwards.
+        for number in (streams.signal.SIGTERM, streams.signal.SIGINT, streams.signal.SIGHUP):
+            self.addCleanup(streams.signal.signal, number, streams.signal.getsignal(number))
 
     def bd(self, *args):
         if args[0] == "show":
@@ -253,6 +256,34 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.review.side_effect = RuntimeError("boom")
         self.run_hook(key, "sid", hook_event_name="PermissionDenied", tool_name="Bash", tool_input={}, reason="[Scope]")
         self.assertEqual(self.activity(key), ("Working", "Claude is continuing after auto mode blocked an action."))
+
+    def test_a_killed_review_still_writes_the_default_state(self):
+        for number in (streams.signal.SIGTERM, streams.signal.SIGINT, streams.signal.SIGHUP):
+            key = self.register(provider="claude", state="Working",
+                                detail="The manager is reviewing where this work stands.", sid="sid")
+            handlers, seen = {}, []
+
+            def review(*args, number=number):
+                seen.append(set(handlers))
+                handlers[number](number, None)  # As if the signal arrived during the consult.
+            self.review.side_effect = review
+            with patch.object(streams.signal, "signal", side_effect=lambda n, h: handlers.__setitem__(n, h)):
+                self.assertEqual(self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done?"), "")
+            self.assertEqual(seen, [{streams.signal.SIGTERM, streams.signal.SIGINT, streams.signal.SIGHUP}])
+            self.assertEqual(self.activity(key), ("Review", "Done?"))
+            with self.assertRaises(Exception):
+                handlers[number](number, None)
+
+    def test_no_needs_you_notification_while_the_manager_reviews(self):
+        reviewing = "The manager is reviewing a permission request for Bash."
+        key = self.register(provider="claude", state="Working", detail=reviewing, sid="sid")
+        self.run_hook(key, "sid", hook_event_name="Notification", notification_type="permission_prompt",
+                      message="Claude needs your permission to use Bash")
+        self.assertEqual(self.activity(key), ("Working", reviewing))
+        self.register(key, provider="claude", state="Working", detail="Claude is continuing.", sid="sid")
+        self.run_hook(key, "sid", hook_event_name="Notification", notification_type="permission_prompt",
+                      message="Claude needs your permission to use Bash")
+        self.assertEqual(self.activity(key), ("Needs you", "Claude needs your permission to use Bash"))
 
     def test_prompt_is_reviewed_and_still_receives_agent_context(self):
         key = self.register(provider="claude", state="Ready", sid="sid")

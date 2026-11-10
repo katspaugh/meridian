@@ -289,10 +289,18 @@ In these examples, replace bd with the command prefix above."""
     return guide
 
 
+def interrupted(signum, frame):
+    raise RuntimeError(f"Interrupted by signal {signum}.")
+
+
 def hook(key, sid):
     event = json.load(sys.stdin)
     if event.get("session_id") != sid:
         return
+    # A hook killed mid-review must still replace the "manager is reviewing" line; unwinding
+    # through subprocess.run also kills the consult.
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, interrupted)
     # First, with no connection open here: a review may consult the manager for minutes.
     try:
         outcome = manager.review(sys.modules[__name__], key, sid, event)
@@ -325,8 +333,14 @@ def hook(key, sid):
             "StopFailure": ("Needs you", event.get("error_details") or "Claude stopped with an error."),
         }[name]
         with database() as db:
-            db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
-                       (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"), key, sid))
+            # A permission prompt's notification follows it within seconds, while the manager may still settle it.
+            reviewing = name == "Notification" and str((db.execute(
+                "SELECT detail FROM activity WHERE id=? AND session=?", (key, sid)).fetchone() or [""])[0] or ""
+            ).startswith("The manager is ")
+            if not reviewing:
+                db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
+                           (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"),
+                            key, sid))
         if name in ("SessionStart", "UserPromptSubmit"):
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": name, "additionalContext": agent_context(key, name)
