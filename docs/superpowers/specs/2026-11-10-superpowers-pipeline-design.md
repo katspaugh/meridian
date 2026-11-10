@@ -65,14 +65,14 @@ Everything else in this document is the author's call (Claude), accepted by the 
 │ (Beads tasks and reply, as now)  │
 ```
 
-- **Placement (Call).** The Pipeline section sits at the top of the inspector, above Tasks, and can be collapsed; the collapsed state is remembered. Its header has a context menu with Clear Pipeline (see "When a run ends or goes quiet"). The footer (state, folder, branch, Mark complete) stays fixed as it is now. The mockup fixes the order; whether the Tasks header scrolls with the content is left to the builder.
+- **Placement (Call).** The Pipeline section sits at the top of the inspector, above Tasks, and can be collapsed; the collapsed state is remembered. Its header has a context menu with Clear Pipeline (see "When a run ends or goes quiet"). The footer (state, folder, branch, Mark complete) stays fixed as it is now. When the section is shown, it and the Tasks header scroll with the content; a workstream without a Pipeline section keeps today's layout, with the Tasks header pinned.
 - **Header.** Run name (derived from the plan or spec file name), time since the run started, and one summary line: "about N to go → merged ≈ HH:MM" while there is an estimate, "No estimate yet" when there is none, "merged HH:MM" or "PR closed without merging" at the end. When subagents are working, say how many.
 - **Phase rows.** One per phase that was not skipped: status mark, label, the time it finished (or `≈` an estimated finish), and a short detail: the task count for plan ("1 task", "6 tasks"), `#123` for PR (a link to the PR), the check summary for CI ("5 of 12 checks", "2 of 12 failing", "12 passed").
-- **Task rows** under the tasks phase: number, title, two boxes for implement and review, the fix round (`r2`) while a task is in a fix loop, and its time.
+- **Task rows** under the tasks phase: number, title, two boxes for implement and review, the fix round (`r2`) while a task is in a fix loop (it goes once the task's review is done), and its time.
 - **Marks:** done, running, slow (running well past its estimate), failed, to come, and needs you. Use the app's existing state colours (`stateColor`) where they fit; "needs you" is orange like elsewhere in the app.
 - **Needs you.** The active phase is marked "needs you" when the workstream is waiting on the person (its state is Needs you or Review), no subagent is working, CI is not what is running, and the run is not finished.
 - **Documents.** Below the timeline, one row per spec or plan that belongs to this workstream, newest first: kind (Spec or Plan), title (the file's first `# ` heading, else its name without date and `.md`), and a control that opens it.
-- **Opening a document (Call).** It opens in its own Muxteroid window, rendered as Markdown with the MarkdownUI package the app already uses, with buttons for Open in Editor (the system default for the file) and Reveal in Finder. The window picks up changes to the file while it is open. A missing file says so instead of showing an empty window.
+- **Opening a document (Call).** It opens in its own Muxteroid window, rendered as Markdown with the MarkdownUI package the app already uses, with buttons for Open in Editor (the system default for the file) and Reveal in Finder. It never loads images from the network, and only `.md` files are ever listed. The window picks up changes to the file while it is open. A missing file says so instead of showing an empty window.
 - **Times** follow the Mac's 12/24-hour setting.
 - The section and its rows have accessibility labels in words ("Plan, done at 13:20, 6 tasks"), as other controls in the app do.
 
@@ -158,7 +158,7 @@ Per-task progress comes only from the subagent-driven flow's `sdd-workspace`, `t
 
 A run can stop short of merged: a branch finished without a PR, an abandoned brainstorm, a PR left open. Two things bound that (Call):
 
-- **Mark complete freezes the run.** For a completed workstream the timeline shows what happened and nothing else: no needs-you or slow marks, no estimates, no times on steps that were still in progress, and its PR is no longer polled. A run whose PR was closed still says "PR closed without merging". Completed workstreams are not scanned for documents and never get a new run. Reopening the workstream brings the run back to life.
+- **Mark complete freezes the run.** For a completed workstream the timeline shows what happened and nothing else: no needs-you or slow marks, no estimates, no times on steps that were still in progress, and its PR is no longer polled. A run whose PR was closed still says "PR closed without merging". Completed workstreams are not scanned for documents and never get a new run: while a workstream is completed, the pipeline ignores every hook and Codex event for it. Reopening the workstream brings the run back to life.
 - **Clear Pipeline.** A context-menu item on the section header removes the workstream's run (the app's version of the mod's `/pipeline reset`). The documents stay listed; the timeline returns when a new run starts.
 
 ## Which documents belong to a workstream
@@ -187,6 +187,7 @@ Each stream in the `list` output gains two fields: the pipeline (absent when the
 - The bridge runs under `/usr/bin/python3`, currently 3.9, standard library only. No `match`, no `X | Y` annotations evaluated at runtime.
 - `list` runs every three seconds while holding `bridge.lock`. No network and no subprocess per refresh unless something changed.
 - Hooks run concurrently with `list` and with each other, and do not take `bridge.lock`. Every read-modify-write of a run must be atomic in SQLite (for example `BEGIN IMMEDIATE`), or events will be lost.
+- Nothing the bridge reads from a plan, a ledger or a stored run may stop the app from decoding its workstream list: task numbers and fix rounds above 9999 are ignored (tasks are numbered from 1), a stored run with a missing or wrongly typed field counts as no run, and the app treats a pipeline or document list it cannot decode as absent.
 - A failure anywhere in the pipeline code must not take existing behaviour with it: the terminal's state update and link collection in the hook, and the whole `list` answer, survive any pipeline error. The pipeline calls are isolated and their errors logged.
 - State lives in `activity.sqlite` beside the existing tables, created on demand like the others, so existing installations upgrade without a migration step.
 - Terminals that were started before this version keep working. Claude terminals call the bridge script by path on every hook, so they pick up the new behaviour as soon as the bundle is rebuilt in place. A running Codex terminal is a long-lived bridge process with the old code loaded: until it is restarted it feeds no commands to the pipeline, and only the file scan reaches it.
