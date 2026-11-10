@@ -3,6 +3,7 @@ import MarkdownUI
 
 struct WorkstreamInspector: View {
     let stream: Stream
+    let asks: [ManagerAsk]
     let terminal: WorkstreamTerminal?
     let busy: Bool
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
@@ -40,6 +41,7 @@ struct WorkstreamInspector: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    if !asks.isEmpty { managerAsks }
                     if stream.tasks.isEmpty { Text("No tasks yet").foregroundStyle(.secondary) }
                     ForEach(groups, id: \.self) { status in
                         taskGroup(status)
@@ -100,6 +102,23 @@ struct WorkstreamInspector: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.bar)
         }
+    }
+
+    private var managerAsks: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle.badge.checkmark").foregroundStyle(.orange)
+                Text("The manager needs your call").fontWeight(.semibold)
+            }
+            ForEach(asks) { ask in
+                if ask.id != asks.first?.id { Divider() }
+                ManagerAskDetails(ask: ask)
+            }
+        }
+        .font(.callout)
+        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+        .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.22)))
     }
 
     private func taskGroup(_ status: String) -> some View {

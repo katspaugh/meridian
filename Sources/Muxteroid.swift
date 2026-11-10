@@ -264,9 +264,11 @@ private struct ConnectedTerminal: View {
 struct Dashboard: View {
     @ObservedObject var store: Store
     @ObservedObject var notifications: AttentionNotifications
+    @ObservedObject var manager: ManagerStore
+    private enum Pane { case workstream, board, manager }
     @State private var expanded: Set<Inbox> = [.active]
     @State private var adding = false
-    @State private var showingBoard = false
+    @State private var pane = Pane.workstream
     @State private var selection: String?
     @State private var agentSelection: String?
     @AppStorage("selectedWorkstreamTerminals") private var terminalSelections = "{}"
@@ -279,6 +281,7 @@ struct Dashboard: View {
     @AppStorage("lastWorkstreamFolder") private var lastFolder = ""
 
     private var selected: Stream? { store.rows.first { $0.id == selection } }
+    private var selectedTerminalID: String? { selected.flatMap(selectedTerminal)?.id }
     private func selectedTerminal(_ stream: Stream) -> WorkstreamTerminal? {
         let choices = (try? JSONDecoder().decode([String: String].self, from: Data(terminalSelections.utf8))) ?? [:]
         return stream.terminals.first { $0.id == choices[stream.id] } ?? stream.terminals.first
@@ -324,7 +327,7 @@ struct Dashboard: View {
             .padding(.vertical, 3).contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(switching)
-        .listRowBackground(!showingBoard && selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
+        .listRowBackground(pane == .workstream && selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
         .accessibilityLabel(summary)
         .help(summary)
     }
@@ -349,7 +352,7 @@ struct Dashboard: View {
                     }
                     .buttonStyle(.plain).disabled(switching)
                     .help(agent.title + " · " + agent.state)
-                    .listRowBackground(!showingBoard && selection == stream.id && agentSelection == agent.id ? Color.accentColor.opacity(0.16) : Color.clear)
+                    .listRowBackground(pane == .workstream && selection == stream.id && agentSelection == agent.id ? Color.accentColor.opacity(0.16) : Color.clear)
                 }
             } label: { sidebarRow(stream) }
         }
@@ -358,7 +361,7 @@ struct Dashboard: View {
     private func selectTerminal(_ stream: Stream, agent: Subagent?) {
         guard !switching else { return }
         if let agent { rememberTerminal(agent.terminalID, in: stream) }
-        showingBoard = false
+        pane = .workstream
         terminalFocus = UUID()
         let previousStream = selection
         selection = stream.id
@@ -443,12 +446,20 @@ struct Dashboard: View {
 
     private var sidebar: some View {
         List {
-            Button { showingBoard = true } label: {
+            Button { pane = .manager } label: {
+                Label("Manager", systemImage: "person.crop.circle.badge.checkmark")
+                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(switching)
+            .badge(manager.state?.asks.count ?? 0)
+            .listRowBackground(pane == .manager ? Color.accentColor.opacity(0.16) : Color.clear)
+            .keyboardShortcut("m", modifiers: [.command, .shift])
+            Button { pane = .board } label: {
                 Label("Sprint board", systemImage: "rectangle.split.3x1")
                     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }
             .buttonStyle(.plain).disabled(switching)
-            .listRowBackground(showingBoard ? Color.accentColor.opacity(0.16) : Color.clear)
+            .listRowBackground(pane == .board ? Color.accentColor.opacity(0.16) : Color.clear)
             .keyboardShortcut("b", modifiers: [.command, .shift])
             ForEach(Inbox.allCases, id: \.self) { box in
                 let streams = store.rows.filter(box.includes)
@@ -474,11 +485,11 @@ struct Dashboard: View {
             } detail: {
                 VStack(spacing: 0) {
                     if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
-                    if showingBoard {
-                        SprintBoard(streams: store.rows, openStream: { stream in
-                            selectTerminal(stream, agent: nil)
-                            expanded.insert(stream.state == "Done" ? .done : .active)
-                        }, newStream: { adding = true })
+                    if pane == .manager {
+                        ManagerView(store: manager, streams: store.rows, openStream: openFromOverview,
+                                    focusedTerminal: selectedTerminalID)
+                    } else if pane == .board {
+                        SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true })
                     } else if let stream = selected {
                         let terminal = selectedTerminal(stream)
                         HSplitView {
@@ -542,13 +553,13 @@ struct Dashboard: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .navigationTitle(showingBoard ? "Sprint board" : (selected?.title ?? "Workstreams"))
+                .navigationTitle(pane == .manager ? "Manager" : pane == .board ? "Sprint board" : (selected?.title ?? "Workstreams"))
                 .toolbar {
                     Button { adding = true } label: { Label("New workstream", systemImage: "plus") }.keyboardShortcut("n")
                     Button { inspectorVisible.toggle() } label: {
                         Label(inspectorVisible ? "Hide inspector" : "Show inspector", systemImage: "sidebar.right")
                     }
-                    .disabled(showingBoard)
+                    .disabled(pane != .workstream)
                     .help(inspectorVisible ? "Hide inspector" : "Show inspector")
                     .keyboardShortcut("i", modifiers: [.command, .option])
                 }
@@ -565,6 +576,9 @@ struct Dashboard: View {
 
         }
         .onChange(of: notifications.destination, initial: true) { _, _ in selectNotification() }
+        .onChange(of: pane == .workstream ? selectedTerminalID : nil, initial: true) { _, id in
+            notifications.focusedTerminal = id
+        }
         .onChange(of: store.rows.map(\.id)) { _, ids in
             selectNotification()
             if !ids.contains(selection ?? "") {
@@ -575,7 +589,7 @@ struct Dashboard: View {
         .sheet(isPresented: $adding) {
             NewStream(store: store, folder: suggestedFolder) { id, folder in
                 lastFolder = folder
-                showingBoard = false
+                pane = .workstream
                 selection = id
                 agentSelection = nil
                 expanded.insert(.active)
@@ -588,9 +602,15 @@ struct Dashboard: View {
     }
 
     private var closeTerminalAction: (() -> Void)? {
-        guard !showingBoard, !store.busy, !switching,
+        guard pane == .workstream, !store.busy, !switching,
               let stream = selected, let terminal = selectedTerminal(stream) else { return nil }
         return { closeTerminal(terminal, in: stream) }
+    }
+
+    /// Opening a workstream from the board or the Manager also reveals it in the sidebar.
+    private func openFromOverview(_ stream: Stream) {
+        selectTerminal(stream, agent: nil)
+        expanded.insert(stream.state == "Done" ? .done : .active)
     }
 
     private func selectNotification() {
@@ -606,7 +626,8 @@ struct Dashboard: View {
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, terminal: selectedTerminal(stream), busy: store.busy) { keepTasksOpen in
+        WorkstreamInspector(stream: stream, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
+                            terminal: selectedTerminal(stream), busy: store.busy) { keepTasksOpen in
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
@@ -694,7 +715,7 @@ struct NewStream: View {
     @Environment(\.openWindow) private var openWindow
     var body: some Scene {
         Window("Muxteroid", id: "dashboard") {
-            Dashboard(store: notifications.store, notifications: notifications)
+            Dashboard(store: notifications.store, notifications: notifications, manager: notifications.manager)
         }.defaultSize(width: 1080, height: 760)
         .commands { TerminalCommands() }
         .onChange(of: notifications.destination) { _, id in

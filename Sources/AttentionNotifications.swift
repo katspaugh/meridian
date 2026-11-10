@@ -8,6 +8,9 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
     @Published var destination: String?
     var terminalDestination: String?
     let store = Store()
+    let manager = ManagerStore()
+    /// The workstream terminal on screen; sweeps never type into it while the app is active.
+    var focusedTerminal: String?
     private let center = UNUserNotificationCenter.current()
     private let defaultsKey = "presentedAttentionRequests"
     private let log = Logger(subsystem: "local.muxteroid.app", category: "notifications")
@@ -34,6 +37,11 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
             while !Task.isCancelled {
                 await store.refresh()
                 if store.loadError.isEmpty { await update(store.rows) }
+                // A sweep can take minutes, so it runs beside the loop rather than inside it.
+                if await manager.refresh(), manager.state?.sweepDue == true, !manager.sweeping {
+                    let exclude = NSApp.isActive ? focusedTerminal : nil
+                    Task { await manager.sweep(excluding: exclude) }
+                }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
