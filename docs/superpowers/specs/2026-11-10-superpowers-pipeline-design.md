@@ -90,7 +90,7 @@ Advancing to a phase: do nothing if any later phase has already started; otherwi
 
 ### Events from Claude
 
-Muxteroid already registers a `PostToolUse` command hook with no matcher for every Claude terminal (`streams.settings`, handled in `streams.hook`), so successful Skill, Bash, Write and Edit calls already arrive there. Events that carry an `agent_id` come from subagents and are ignored for the pipeline, as the mod does. Before relying on a payload field, capture a real event and check its shape.
+Muxteroid already registers a `PostToolUse` command hook with no matcher for every Claude terminal (`streams.settings`, handled in `streams.hook`), so successful Skill, Bash, Write and Edit calls already arrive there. Events that carry an `agent_id` come from subagents and are ignored for the pipeline, as the mod does. The payload shapes were captured from Claude Code on 2026-11-10 and are recorded in the plan.
 
 - **Skill** (`tool_input.skill`, with or without the `superpowers:` prefix for the first three):
   - `brainstorming` → brainstorm. `writing-plans` → plan. `subagent-driven-development` or `executing-plans` → execute.
@@ -101,7 +101,7 @@ Muxteroid already registers a `PostToolUse` command hook with no matcher for eve
 - **Write / Edit** (`tool_input.file_path`):
   - `…/docs/superpowers/specs/*.md` → the file is this workstream's document, and the run's spec; the run is named after it until there is a plan.
   - `…/docs/superpowers/plans/*.md` → the file is this workstream's document, and the run's plan: parse its tasks, advance to plan, name the run after the plan.
-  - Whether such a write starts a new run follows the rule under "Events from files".
+  - Whether such a write starts a new run follows the rule under "Events from files". Only a Write that creates the file counts as a new document. An Edit, or a Write over an existing file, lists the document but never starts a run, so editing a spec that was already on the branch cannot replace a live run.
 - **Bash** (`tool_input.command`, output from `tool_response`):
   - `sdd-workspace` in the command and a `…/.superpowers/sdd/<slug>` path in the output → that is the run's workspace. Read its `plan-path` marker (repo-relative or absolute), parse that plan, advance to execute. If it names a different plan than the current run and that run has started executing, start a new run.
   - `task-brief <plan> N` → task N starts (implement running) and becomes the current task.
@@ -166,7 +166,7 @@ A run can stop short of merged: a branch finished without a PR, an abandoned bra
 **Call:** only documents created in this workstream. A file under `docs/superpowers/specs` or `docs/superpowers/plans` belongs if either holds:
 
 1. A Write or Edit to it was observed from one of the workstream's Claude terminals (any path, also outside the scanned directories' root).
-2. A scan found it **untracked by Git** (or the folder is not a Git repository), and, for a workstream that uses a folder directly instead of its own worktree, modified after the workstream was created.
+2. A scan found it **untracked by Git** (ignored files count; so does any file when a directly used folder is not a Git repository), and, for a workstream that uses a folder directly instead of its own worktree, modified after the workstream was created. If Git cannot answer (a timeout, a missing `git`), the scan adopts nothing and tries again on the next refresh.
 
 Once a document belongs it stays listed for as long as the file exists, including after it is committed.
 
@@ -187,6 +187,7 @@ Each stream in the `list` output gains two fields: the pipeline (absent when the
 - The bridge runs under `/usr/bin/python3`, currently 3.9, standard library only. No `match`, no `X | Y` annotations evaluated at runtime.
 - `list` runs every three seconds while holding `bridge.lock`. No network and no subprocess per refresh unless something changed.
 - Hooks run concurrently with `list` and with each other, and do not take `bridge.lock`. Every read-modify-write of a run must be atomic in SQLite (for example `BEGIN IMMEDIATE`), or events will be lost.
+- A failure anywhere in the pipeline code must not take existing behaviour with it: the terminal's state update and link collection in the hook, and the whole `list` answer, survive any pipeline error. The pipeline calls are isolated and their errors logged.
 - State lives in `activity.sqlite` beside the existing tables, created on demand like the others, so existing installations upgrade without a migration step.
 - Terminals that were started before this version keep working. Claude terminals call the bridge script by path on every hook, so they pick up the new behaviour as soon as the bundle is rebuilt in place. A running Codex terminal is a long-lived bridge process with the old code loaded: until it is restarted it feeds no commands to the pipeline, and only the file scan reaches it.
 - A new Python file must be added to both the copy list in `build.sh` and the `exclude` list in `Package.swift`.

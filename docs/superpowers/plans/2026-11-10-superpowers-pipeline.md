@@ -17,7 +17,7 @@
 - The bridge runs under `/usr/bin/python3` (3.9), standard library only. No `match`, no `X | Y` annotations.
 - `list` runs every three seconds holding `bridge.lock`: no network, and no subprocess unless a file changed.
 - Hooks run concurrently with `list` and with each other and do not take `bridge.lock`. Every read-modify-write of a run goes through `pipeline_tracker.update`.
-- An exception that escapes `list` blanks the whole app, and one that escapes `hook` breaks the agent's turn. Nothing in the pipeline code may raise out of `streams.streams()` or `streams.hook()` because of a missing, unreadable or malformed file, row or payload.
+- An exception that escapes `list` blanks the whole app, and one that escapes `hook` loses the terminal's state update and its links. The pipeline must never cause either: the tracker handles missing, unreadable and malformed files, rows and payloads itself, and every call from `streams.hook`, `streams.streams` and `codex_session.observe` into the tracker goes through `pipeline_tracker.guarded`, which swallows and logs anything else.
 - Events with an `agent_id` (Claude) or from a child thread (Codex) never touch the pipeline.
 - No document bodies in `list` output.
 - A workstream with no Superpowers activity gets `"pipeline": null` and `"documents": []` and looks exactly as it does today.
@@ -25,6 +25,20 @@
 - Every new `.py` file is added to the `cp` line in `build.sh` and the `exclude` list in `Package.swift`.
 - Run the Python suite with `/usr/bin/python3 -m unittest discover -s Tests`. It must stay green after every task (35 tests pass today, 3 skipped).
 - Never run the built app or the bridge against the live data directory. Manual checks set `MUXTEROID_HOME` to a scratch directory.
+- End every commit message with the trailer `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>` (the `git commit -m` lines in the tasks show the subject only).
+
+## Hook payloads
+
+Captured from Claude Code's `PostToolUse` command hook on 2026-11-10. Every event also carries `session_id`, `cwd`, `hook_event_name`, `tool_name`, `tool_use_id` and `transcript_path`; a subagent's events add `agent_id`.
+
+| Tool | `tool_input` | `tool_response` |
+|---|---|---|
+| `Skill` | `{"skill": "superpowers:verification-before-completion"}` | `{"success": true, "commandName": "superpowers:verification-before-completion"}` |
+| `Bash` | `{"command": "echo hello", "description": "Print hello"}` | `{"stdout": "hello", "stderr": "", "interrupted": false, "isImage": false, "noOutputExpected": false}` |
+| `Write` | `{"file_path": "/abs/a.md", "content": "# A"}` | `{"type": "create", "filePath": "./a.md", "content": "# A", "structuredPatch": [], "originalFile": null, "userModified": false}` |
+| `Edit` | `{"file_path": "/abs/a.md", "old_string": "A", "new_string": "B", "replace_all": false}` | `{"filePath": "./a.md", "oldString": "A", "newString": "B", "originalFile": "# A", "structuredPatch": [...]}` |
+
+`file_path` is absolute. A `Write` over an existing file reports a `type` other than `"create"`.
 
 ## Review Focus
 
@@ -254,6 +268,8 @@ def test_workspace_and_brief_paths_may_contain_spaces(self):
     self.assertEqual(run['tasks'][1]['implement']['status'], 'running')
     pipeline.command_event(run, 'x/review-package docs/p.md a b', '', T0 + 2 * MIN)
     self.assertEqual(run['tasks'][1]['review']['status'], 'running')
+    pipeline.command_event(run, 'bash "/p q/scripts/task-brief" docs/p.md 3', '', T0 + 3 * MIN)
+    self.assertEqual(run['currentTask'], 3)
 
 def test_pull_request_commands(self):
     run = pipeline.advance_to(planned(), 'pr', T0)
@@ -283,7 +299,7 @@ Expected: `AttributeError: module 'pipeline' has no attribute 'skill_event'` (an
   - not `is_new`: if the run is live and `path == run['planPath']`, `with_plan` again; otherwise return `run` untouched.
 - `workspace_path`: only when the command contains `sdd-workspace` as a word; return the last output line that matches `^(/.*/\.superpowers/sdd/[^/\s]+)\s*$`.
 - `attach_workspace`: port the run-selection part of `attachWorkspace` (new run when `None`, finished, or a different plan while execute has started), then `with_plan` if `plan_path`, `advance_to(…, 'execute')`, set `workspace`, drop `ledgerMtime`.
-- `command_event`: returns `run` unchanged when it is `None` or finished. Port `onBash`'s remaining branches. The brief pattern is `\btask-brief\s+(?:"[^"]*"|'[^']*'|\S+)\s+(\d+)`. `gh pr create` needs `PR_URL` in the output and calls `pull_request_created`.
+- `command_event`: returns `run` unchanged when it is `None` or finished. Port `onBash`'s remaining branches. The brief pattern is `\btask-brief["']?\s+(?:"[^"]*"|'[^']*'|\S+)\s+(\d+)`. `gh pr create` needs `PR_URL` in the output and calls `pull_request_created`.
 - `classify_check`, `apply_pr_view`: port `classifyCheck`, `applyPrView`.
 
 - [ ] **Step 4: Run them and see them pass**
@@ -441,8 +457,9 @@ git commit -m "Schedule and render a Superpowers run"
   - `load(db, stream) -> Optional[dict]`
   - `update(db, stream, change) -> Optional[dict]`: `change(run_or_None) -> run_or_None`; `None` deletes the row.
   - `reset(db, stream) -> None`
-  - `record_document(db, stream, kind, path, now) -> None`
+  - `record_document(db, stream, kind, path, now, created=True) -> None` (`created` false means the document is listed but can never start a run)
   - `tool_event(db, key, name, args, response, now) -> None`
+  - `guarded(db, default, function, *args, **kwargs)`: returns `function(*args, **kwargs)`; on any `Exception` it calls `db.rollback()`, logs `pipeline failed type=<exception class name>` with `workstream_log.record`, and returns `default`. The caller must have no uncommitted writes of its own on `db`.
   - `command_event(db, key, command, output, now) -> None`
 - Bridge action: `streams.py pipeline-reset STREAM`.
 
@@ -557,6 +574,27 @@ def test_undecodable_run_counts_as_none_and_is_replaced(self):
     self.post('mx-example', 'Skill', {'skill': 'superpowers:brainstorming'})
     self.assertEqual(self.run_state()['phases']['brainstorm']['status'], 'running')
 
+def test_edit_or_overwrite_lists_a_document_but_never_starts_a_run(self):
+    self.post('mx-example', 'Skill', {'skill': 'superpowers:executing-plans'})
+    before = self.run_state()['launchedAt']
+    spec = self.folder / 'docs/superpowers/specs/2026-01-01-old-design.md'
+    spec.parent.mkdir(parents=True)
+    spec.write_text('# Old design\n')
+    self.post('mx-example', 'Edit', {'file_path': str(spec)}, {'filePath': str(spec)})
+    self.post('mx-example', 'Write', {'file_path': str(spec)}, {'type': 'update', 'filePath': str(spec)})
+    run = self.run_state()
+    self.assertEqual((run['launchedAt'], run['phases']['execute']['status']), (before, 'running'))
+    self.assertNotIn('specPath', run)
+    with streams.database() as db:
+        self.assertEqual(db.execute('SELECT title FROM pipeline_docs').fetchall(), [('Old design',)])
+
+def test_a_failing_tracker_does_not_break_the_hook(self):
+    with patch.object(tracker, 'tool_event', side_effect=RuntimeError('boom')):
+        self.post('mx-example', 'Bash', {'command': 'gh pr create'}, {'stdout': 'https://github.com/o/r/pull/12'})
+    with streams.database() as db:
+        self.assertEqual(db.execute("SELECT detail FROM activity WHERE id='mx-example'").fetchone()[0], 'Claude is continuing.')
+        self.assertEqual(db.execute("SELECT count(*) FROM links WHERE stream='mx-example'").fetchone()[0], 1)
+
 def test_reset_action_removes_the_run_and_keeps_documents(self):
     self.post('mx-example', 'Write', {'file_path': str(self.plan_file())})
     streams.main('pipeline-reset', 'mx-example')
@@ -589,21 +627,21 @@ Expected: `ModuleNotFoundError: No module named 'pipeline_tracker'`
 
 - `load`: return the decoded run only if it is a dict whose `phases` has a dict with a string `status` for every phase in `pipeline.PHASES` and whose `tasks` is a list; otherwise `None`.
 - `update`: if `not db.in_transaction`, `db.execute('BEGIN IMMEDIATE')` (an open Python sqlite3 transaction already holds the write lock); `load`; call `change`; `INSERT OR REPLACE` the JSON or `DELETE` on `None`; `db.commit()`; return the run.
-- `record_document`: read the file as UTF-8; on `OSError` or `UnicodeError` return. Title is the first line starting with `# ` (text after it, stripped), else `pipeline.slug_name(path)`. `is_new` is "no `pipeline_docs` row for this stream and path". Upsert the row with the file's `st_mtime`, then `update` with `pipeline.document_event` (`parsed` is `parse_plan_tasks(text)` for a plan, `[]` for a spec).
-- `tool_event`: `stream = owner(db, key)`. `Skill` → `update` with `pipeline.skill_event(run, args.get('skill') or '', now)`. `Write` and `Edit` → `path = args.get('file_path') or ''`; kind is `spec` when it matches `/docs/superpowers/specs/[^/]+\.md$`, `plan` for `/docs/superpowers/plans/[^/]+\.md$`; then `record_document`. `Bash` → `command_event(db, key, args.get('command') or '', text, now)`. A tool whose lowercased name contains both `github` and `create_pull_request` → the first `pipeline.PR_URL` match in `text` goes to `pipeline.pull_request_created`. `text` is `response['stdout']` when `response` is a dict with a string `stdout`, `response` itself when it is a string, else `json.dumps(response)`.
+- `record_document`: read the file as UTF-8; on `OSError` or `UnicodeError` return. Title is the first line starting with `# ` (text after it, stripped), else `pipeline.slug_name(path)`. `is_new` is "`created`, and no `pipeline_docs` row for this stream and path". Upsert the row with the file's `st_mtime`, then `update` with `pipeline.document_event` (`parsed` is `parse_plan_tasks(text)` for a plan, `[]` for a spec).
+- `tool_event`: `stream = owner(db, key)`. `Skill` → `update` with `pipeline.skill_event(run, args.get('skill') or '', now)`. `Write` and `Edit` → `path = args.get('file_path') or ''`; kind is `spec` when it matches `/docs/superpowers/specs/[^/]+\.md$`, `plan` for `/docs/superpowers/plans/[^/]+\.md$`; then `record_document` with `created` true only for a `Write` whose response does not carry a `type` other than `"create"` (an `Edit`, or a `Write` over an existing file, lists the document without starting a run). `Bash` → `command_event(db, key, args.get('command') or '', text, now)`. A tool whose lowercased name contains both `github` and `create_pull_request` → the first `pipeline.PR_URL` match in `text` goes to `pipeline.pull_request_created`. `text` is `response['stdout']` when `response` is a dict with a string `stdout`, `response` itself when it is a string, else `json.dumps(response)`.
 - `command_event`: `workspace = pipeline.workspace_path(command, output)`. With a workspace: read `<workspace>/plan-path` (stripped; missing → no plan); the plan path is the marker if absolute, else joined to the workspace path with its trailing `/.superpowers/sdd/<slug>` removed; parse the plan if it can be read; `update` with `pipeline.attach_workspace`. Without one: `update` with `pipeline.command_event`.
 
 - [ ] **Step 4: Wire it into `Sources/streams.py`**
 
 - `import pipeline_tracker as tracker` beside the other module imports, and `tracker.initialize(db)` in `database()` after `subagents.initialize(db)`.
-- In `hook`, inside the existing `PostToolUse` block and after `links.tool_result(...)`: when `not event.get('agent_id')`, call `tracker.tool_event(db, key, event.get('tool_name', ''), event.get('tool_input') or {}, event.get('tool_response'), time.time())`.
+- In `hook`, after the existing `PostToolUse` block has closed (so the links are committed): when the event is `PostToolUse` and `not event.get('agent_id')`, open a second `with database() as db:` and call `tracker.guarded(db, None, tracker.tool_event, db, key, event.get('tool_name', ''), event.get('tool_input') or {}, event.get('tool_response'), time.time())`.
 - In `main`, beside the `link` action (before `bridge.lock`): `pipeline-reset` takes one stream id and calls `tracker.reset` inside `with database() as db`.
 - Add `Sources/pipeline_tracker.py` to the `cp` line in `build.sh` and `"pipeline_tracker.py"` to `exclude` in `Package.swift`.
 
 - [ ] **Step 5: Run the whole suite**
 
 Run: `/usr/bin/python3 -m unittest discover -s Tests`
-Expected: `OK` with 66 tests (35 existing, 22 model, 9 tracker), 3 skipped.
+Expected: `OK` with 68 tests (35 existing, 22 model, 11 tracker), 3 skipped.
 
 - [ ] **Step 6: Commit**
 
@@ -664,6 +702,17 @@ def test_untracked_documents_belong_and_merged_ones_do_not(self):
     self.assertEqual(self.snap()[1][0]['path'], str(spec))      # stays after it is committed
     spec.unlink()
     self.assertEqual(self.snap()[1], [])
+
+def test_gitignored_documents_still_belong(self):
+    self.write('.gitignore', 'docs/superpowers/\n')
+    self.write('docs/superpowers/plans/2026-11-10-a.md', '# A Plan\n')
+    self.assertEqual([d['title'] for d in self.snap()[1]], ['A Plan'])
+
+def test_git_failure_adopts_nothing_and_is_retried(self):
+    self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
+    with patch.object(tracker.subprocess, 'run', side_effect=subprocess.TimeoutExpired('git', 4)):
+        self.assertEqual(self.snap(), (None, []))
+    self.assertEqual(len(self.snap()[1]), 1)
 
 def test_plan_then_ledger_then_a_second_run(self):
     self.write('docs/superpowers/specs/2026-11-10-a-design.md', '# A\n')
@@ -731,6 +780,11 @@ def test_list_rows_carry_pipeline_and_documents(self):
     self.assertEqual(row['documents'][0]['title'], 'Demo Implementation Plan')
     self.parent['status'] = 'closed'
     self.assertTrue(streams.streams()[0]['pipeline']['frozen'])
+
+def test_a_failing_snapshot_leaves_the_list_working(self):
+    with patch.object(tracker, 'snapshot', side_effect=RuntimeError('boom')):
+        row = streams.streams()[0]
+    self.assertEqual((row['id'], row['pipeline'], row['documents']), ('mx-example', None, []))
 ```
 
 - [ ] **Step 2: Run them and see them fail**
@@ -740,11 +794,11 @@ Expected: `AttributeError: module 'pipeline_tracker' has no attribute 'snapshot'
 
 - [ ] **Step 3: Implement the scan, the ledger poll and `snapshot`**
 
-`snapshot` does, in order, catching `OSError` around file access so nothing escapes:
+`snapshot` does, in order. File reads follow `record_document`'s rule (skip on `OSError` or `UnicodeError`), including `plan-path` and `progress.md`:
 
 1. Unless `closed`: **scan.** List regular `*.md` files in `<root>/docs/superpowers/specs` and `<root>/docs/superpowers/plans`. The signature is the JSON of their sorted `[path, st_mtime_ns]` pairs; a stream with no stored signature compares as `[]`. If it equals the stored one, skip to step 2. Otherwise:
-   - Candidates are listed files with no `pipeline_docs` row. If there are any, ask `git -C <root> ls-files --others --exclude-standard -- docs/superpowers/specs docs/superpowers/plans` (timeout 4 s) and keep the candidates it names; if git exits non-zero or cannot run, keep them all. When `own_worktree` is false, also require `st_mtime > created`.
-   - Call `record_document` for each kept candidate and for each known document whose `st_mtime` differs from its row, oldest `st_mtime` first.
+   - Candidates are listed files with no `pipeline_docs` row. If there are any, ask `git -C <root> ls-files --others -- docs/superpowers/specs docs/superpowers/plans` (timeout 4 s, `LC_ALL=C`; no `--exclude-standard`, so ignored files count) and keep the candidates it names. If git fails: when `own_worktree` is false and its stderr contains `not a git repository`, keep them all; in every other case (timeout, git missing, any other error) keep none and do **not** store the signature, so the next refresh tries again. When `own_worktree` is false, also require `st_mtime > created`.
+   - Call `record_document` (with `created=True`) for each kept candidate and for each known document whose `st_mtime` differs from its row, oldest `st_mtime` first.
    - Store the signature.
 2. Unless `closed`: **ledger.** For a live run, the workspace is `run['workspace']`, else `<root>/.superpowers/sdd/<plan file name without .md>` when `run['planPath']` is set and that directory has a `plan-path` file. If `<workspace>/progress.md` exists and its `st_mtime` differs from `run.get('ledgerMtime')`, read it and `update` with a change that does `pipeline.advance_to(run, 'execute', now)`, then `pipeline.apply_ledger`, and sets `workspace` and `ledgerMtime` (leaving a finished or missing run alone). The advance is what moves a files-only run to tasks.
 3. Delete `pipeline_docs` rows whose files no longer exist; build `documents` from the rest, ordered by `mtime` descending.
@@ -752,12 +806,12 @@ Expected: `AttributeError: module 'pipeline_tracker' has no attribute 'snapshot'
 
 - [ ] **Step 4: Add the fields in `streams.streams()`**
 
-In the loop that builds `rows`, before the `Done` override changes `state`, call `tracker.snapshot(db, key, meta.get('worktreeRoot') or meta['folder'], created=tracker.timestamp(issue.get('created_at') or ''), own_worktree=bool(meta.get('worktreeRoot')), closed=issue['status'] == 'closed', waiting=state in ('Needs you', 'Review'), active_agents=<count of this stream's agents whose state is 'Working' or 'Needs you'>, now=time.time())` with `meta = issue['metadata']`, and add `pipeline=` and `documents=` to the row. The connection `db` stays usable after its `with` block ends.
+In the loop that builds `rows`, before the `Done` override changes `state`, call `tracker.guarded(db, (None, []), tracker.snapshot, db, key, meta.get('worktreeRoot') or meta['folder'], created=tracker.timestamp(issue.get('created_at') or ''), own_worktree=bool(meta.get('worktreeRoot')), closed=issue['status'] == 'closed', waiting=state in ('Needs you', 'Review'), active_agents=<count of this stream's agents whose state is 'Working' or 'Needs you'>, now=time.time())` with `meta = issue['metadata']`, and add `pipeline=` and `documents=` to the row. The connection `db` stays usable after its `with` block ends, and by then it has no uncommitted writes.
 
 - [ ] **Step 5: Run the whole suite**
 
 Run: `/usr/bin/python3 -m unittest discover -s Tests`
-Expected: `OK` with 75 tests, 3 skipped.
+Expected: `OK` with 80 tests, 3 skipped.
 
 - [ ] **Step 6: Commit**
 
@@ -844,12 +898,12 @@ Expected: failures naming `pr_view`, `poll_pull_requests` and `Unknown action`.
 - `pr_view`: catch `OSError`, `subprocess.TimeoutExpired` and `ValueError`; a non-zero exit is `None`.
 - `poll_pull_requests`: for each id, `load`; skip unless the run has `prUrl` and is not finished; call `view(url)` with no transaction open; when it returns a dict, `update` with a change that applies `pipeline.apply_pr_view` only if the run still has that `prUrl` and is not finished.
 - `streams.main`: `pipeline-poll` beside `pipeline-reset`, calling `tracker.poll_pull_requests(db, args, time.time())` inside `with database() as db`. It must not take `bridge.lock`.
-- `codex_session.observe`: `import pipeline_tracker as tracker`; in the `commandExecution` branch, after `links.tool_result(...)`, when `not parent` call `tracker.command_event(db, key, item["command"], item.get("aggregatedOutput") or "", time.time())`.
+- `codex_session.observe`: `import pipeline_tracker as tracker`; in the `commandExecution` branch, after `links.tool_result(...)`, when `not parent`, `db.commit()` and then call `tracker.guarded(db, None, tracker.command_event, db, key, item["command"], item.get("aggregatedOutput") or "", time.time())`.
 
 - [ ] **Step 4: Run the whole suite**
 
 Run: `/usr/bin/python3 -m unittest discover -s Tests`
-Expected: `OK` with 79 tests, 3 skipped.
+Expected: `OK` with 84 tests, 3 skipped.
 
 - [ ] **Step 5: Commit**
 
@@ -1000,39 +1054,66 @@ In "How it runs", after the sentence that ends "…for reporting activity.", add
 Run: `./build.sh 2>&1 | tail -3 && ls build/Muxteroid.app/Contents/Resources/pipeline.py build/Muxteroid.app/Contents/Resources/pipeline_tracker.py`
 Expected: the build completes and both files are listed.
 
-- [ ] **Step 5: Check it by hand against a scratch home**
+- [ ] **Step 5: Check the bridge end to end against a scratch home**
 
 ```bash
-export MUXTEROID_HOME="$(mktemp -d)/Application Support/Muxteroid"; mkdir -p "$MUXTEROID_HOME"
-demo="$(mktemp -d)/demo repo"; mkdir -p "$demo"; git -C "$demo" init -q -b main
+scratch="$(mktemp -d)"
+export MUXTEROID_HOME="$scratch/Application Support/Muxteroid"; mkdir -p "$MUXTEROID_HOME"
+demo="$scratch/demo repo"; mkdir -p "$demo"; git -C "$demo" init -q -b main
 git -C "$demo" -c user.name=T -c user.email=t@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m Initial
-bridge=build/Muxteroid.app/Contents/Resources/streams.py
+bridge="$PWD/build/Muxteroid.app/Contents/Resources/streams.py"
+show() { /usr/bin/python3 "$bridge" list | /usr/bin/python3 -c "import json,sys; [print(s['title'], '|', (s['pipeline'] or {}).get('name'), [(p['id'], p['mark'], p['detail']) for p in (s['pipeline'] or {}).get('phases', [])][:3], [d['kind'] for d in s['documents']]) for s in json.load(sys.stdin)]"; }
 plain=$(/usr/bin/python3 "$bridge" create "Plain" "$demo" "" claude)
 run=$(/usr/bin/python3 "$bridge" create "With a run" "$demo" "" claude)
 root=$(/usr/bin/python3 "$bridge" list | /usr/bin/python3 -c "import json,sys; print(next(s['folder'] for s in json.load(sys.stdin) if s['title']=='With a run'))")
 mkdir -p "$root/docs/superpowers/specs" "$root/docs/superpowers/plans"
 cp docs/superpowers/specs/2026-11-10-superpowers-pipeline-design.md "$root/docs/superpowers/specs/"
-cp docs/superpowers/plans/2026-11-10-superpowers-pipeline.md "$root/docs/superpowers/plans/"
-build/Muxteroid.app/Contents/MacOS/Muxteroid
+sleep 1; cp docs/superpowers/plans/2026-11-10-superpowers-pipeline.md "$root/docs/superpowers/plans/"
+show
 ```
 
-Do not click **Start terminal** (that would start a real agent). Confirm each of these, and say in the report which were seen. If you cannot operate the window, check items 1, 2, 4 and 7 in the output of `/usr/bin/python3 "$bridge" list` instead (use `/usr/bin/python3 "$bridge" pipeline-reset "$run"` for 7) and report items 3, 5, 6 and 8 as not checked, for the owner to run:
+Expected: `Plain | None [] []`, and `With a run | superpowers-pipeline [('brainstorm', 'done', …), ('plan', 'running', '8 tasks'), ('execute', 'todo', '0 of 8')] ['plan', 'spec']`.
+
+```bash
+ws="$root/.superpowers/sdd/2026-11-10-superpowers-pipeline"; mkdir -p "$ws"
+echo docs/superpowers/plans/2026-11-10-superpowers-pipeline.md > "$ws/plan-path"
+printf '# SDD ledger\nTask 1: complete\n' > "$ws/progress.md"; show
+/usr/bin/python3 "$bridge" close "$run" --force; show
+/usr/bin/python3 "$bridge" reopen "$run"; /usr/bin/python3 "$bridge" pipeline-reset "$run"; show
+```
+
+Expected, for "With a run": first `('execute', 'running', '1 of 8')`; after `close`, no phase is `running`; after the reset, `None [] ['plan', 'spec']`.
+
+- [ ] **Step 6: Prepare the window check for the owner**
+
+The built app shares its bundle identifier, and so its preferences and notifications, with the Muxteroid the owner is running. Make a separate copy and start it without waiting on it:
+
+```bash
+cp -R build/Muxteroid.app "$scratch/MuxteroidCheck.app"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.muxteroid.check' "$scratch/MuxteroidCheck.app/Contents/Info.plist"
+codesign --force --sign - "$scratch/MuxteroidCheck.app"
+printf '# SDD ledger\nTask 1: complete\n' > "$ws/progress.md"; touch "$root/docs/superpowers/plans/2026-11-10-superpowers-pipeline.md"
+cp "$root/docs/superpowers/plans/2026-11-10-superpowers-pipeline.md" "$root/docs/superpowers/plans/2026-11-11-second.md"
+open -n --env MUXTEROID_HOME="$MUXTEROID_HOME" "$scratch/MuxteroidCheck.app"
+echo "$scratch"
+```
+
+Report the scratch path and this list. These need eyes on the window; report each as seen or not seen, and do not claim any you did not see. Nobody should click **Start terminal** (that would start a real agent).
 
 1. "Plain" shows no Pipeline section and its inspector looks as before.
-2. "With a run" shows Pipeline above Tasks: brainstorm done, plan in progress with "8 tasks", eight task rows to come, a summary of about two hours to go, and a Spec and a Plan row.
-3. Clicking the Plan row opens a window with the rendered plan. Appending a line to the copied file shows up within a few seconds. ⌘W closes the window. Deleting the copied file while its window is open shows "Document not found".
-4. With `mkdir -p "$root/.superpowers/sdd/2026-11-10-superpowers-pipeline" && cd "$root/.superpowers/sdd/2026-11-10-superpowers-pipeline" && echo docs/superpowers/plans/2026-11-10-superpowers-pipeline.md > plan-path && printf '# SDD ledger\nTask 1: complete\n' > progress.md`, within a few seconds the tasks phase is in progress, task 1 is done and task 2 is in progress.
-5. Narrow the inspector to its minimum and widen it to its maximum: rows stay on one line and nothing overlaps.
-6. Collapse the section, quit, relaunch with the same `MUXTEROID_HOME`: it is still collapsed.
-7. Right-click Pipeline → Clear Pipeline: the timeline goes, the Spec and Plan rows stay.
-8. Mark "With a run" complete (after recreating a run by adding another new plan file): no orange or blue marks and no summary line.
+2. "With a run" shows Pipeline above Tasks, with a timeline, a summary line, and Spec and Plan rows.
+3. Clicking a Plan row opens a window with the rendered plan. Appending a line to that file shows up within a few seconds. ⌘W closes the window. Deleting the file while its window is open shows "Document not found".
+4. Narrow the inspector to its minimum and widen it to its maximum: rows stay on one line and nothing overlaps.
+5. Collapse the section, quit, start the copy again the same way: it is still collapsed.
+6. Right-click Pipeline → Clear Pipeline: the timeline goes, the Spec and Plan rows stay.
+7. Mark "With a run" complete while it has a run: no orange or blue marks and no summary line.
 
-Afterwards remove the two scratch worktrees with `git -C "$demo" worktree prune` and delete both temporary directories.
+When the check is over, quit the copy and delete `$scratch`.
 
-- [ ] **Step 6: Run the Python suite once more and commit**
+- [ ] **Step 7: Run the Python suite once more and commit**
 
 Run: `/usr/bin/python3 -m unittest discover -s Tests`
-Expected: `OK` with 79 tests, 3 skipped.
+Expected: `OK` with 84 tests, 3 skipped.
 
 ```bash
 git add Sources/DocumentWindow.swift Sources/Muxteroid.swift Sources/WorkstreamInspector.swift README.md
