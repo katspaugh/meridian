@@ -53,7 +53,7 @@ REVIEW_PACKAGE = re.compile(r"\breview-package\b")
 PR_CREATE = re.compile(r"\bgh\s+pr\s+create\b")
 PR_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
 PR_MERGE_AUTO = re.compile(r"--auto\b")
-PR_MERGE_NUMBER = re.compile(r"\bgh\s+pr\s+merge\s+(?:#?|[\"']?https?://github\.com/[\w.-]+/[\w.-]+/pull/)(\d+)")
+PR_MERGE_NUMBER = re.compile(r"\bgh\s+pr\s+merge\s+#?(\d+)")
 TASK_BRIEF_NAME = re.compile(r"\btask-brief\b")
 # Any command that one of the run's command rules can act on.
 RUN_COMMANDS = (SDD_WORKSPACE, TASK_BRIEF_NAME, REVIEW_PACKAGE, PR_CREATE, PR_MERGE)
@@ -336,8 +336,10 @@ def command_event(run, command, output, now):
     if PR_CREATE.search(command):
         url = PR_URL.search(output)
         return pull_request_created(run, url.group(0), now) if url else run
-    if PR_MERGE.search(command) and not PR_MERGE_AUTO.search(command):
-        named = PR_MERGE_NUMBER.search(command)
+    merge = PR_MERGE.search(command)
+    if merge and not PR_MERGE_AUTO.search(command):
+        # A pull-request URL anywhere in the merge command names its PR like a bare number.
+        named = PR_MERGE_NUMBER.search(command) or PR_URL.search(command, merge.end())
         if named is None or int(named.group(1)) == run.get("pr"):
             complete_phase(run, "merge", now)
     return run

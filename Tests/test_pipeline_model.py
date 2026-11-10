@@ -167,6 +167,7 @@ class EventRuleTests(unittest.TestCase):
         run = pipeline.advance_to(planned(), 'pr', T0)
         pipeline.command_event(run, 'gh pr create --fill', 'https://github.com/o/r/pull/12\n', T0 + MIN)
         pipeline.command_event(run, 'gh pr merge https://github.com/o/r/pull/99 --squash', '', T0 + 2 * MIN)
+        pipeline.command_event(run, 'gh pr merge --squash https://github.com/o/r/pull/99', '', T0 + 2 * MIN)
         self.assertFalse(pipeline.is_finished(run))
         pipeline.command_event(run, 'gh pr merge "https://github.com/o/r/pull/12" --squash', '', T0 + 3 * MIN)
         self.assertTrue(pipeline.is_finished(run))
