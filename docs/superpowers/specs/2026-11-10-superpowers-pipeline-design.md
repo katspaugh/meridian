@@ -67,7 +67,7 @@ Everything else in this document is the author's call (Claude), accepted by the 
 
 - **Placement (Call).** The Pipeline section sits at the top of the inspector, above Tasks, and can be collapsed; the collapsed state is remembered. Its header has a context menu with Clear Pipeline (see "When a run ends or goes quiet"). The footer (state, folder, branch, Mark complete) stays fixed as it is now. The mockup fixes the order; whether the Tasks header scrolls with the content is left to the builder.
 - **Header.** Run name (derived from the plan or spec file name), time since the run started, and one summary line: "about N to go → merged ≈ HH:MM" while there is an estimate, "No estimate yet" when there is none, "merged HH:MM" or "PR closed without merging" at the end. When subagents are working, say how many.
-- **Phase rows.** One per phase that was not skipped: status mark, label, the time it finished (or `≈` an estimated finish), and a short detail: the task count for plan, `#123` for PR (a link to the PR), the check summary for CI ("5 of 12 checks", "2 of 12 failing", "12 passed").
+- **Phase rows.** One per phase that was not skipped: status mark, label, the time it finished (or `≈` an estimated finish), and a short detail: the task count for plan ("1 task", "6 tasks"), `#123` for PR (a link to the PR), the check summary for CI ("5 of 12 checks", "2 of 12 failing", "12 passed").
 - **Task rows** under the tasks phase: number, title, two boxes for implement and review, the fix round (`r2`) while a task is in a fix loop, and its time.
 - **Marks:** done, running, slow (running well past its estimate), failed, to come, and needs you. Use the app's existing state colours (`stateColor`) where they fit; "needs you" is orange like elsewhere in the app.
 - **Needs you.** The active phase is marked "needs you" when the workstream is waiting on the person (its state is Needs you or Review), no subagent is working, CI is not what is running, and the run is not finished.
@@ -126,7 +126,7 @@ These run during the regular `list` refresh and must stay at the cost of a few `
 
 ### Events from Codex
 
-Codex does not report skill use. `codex_session.observe` already hands each finished turn's successful shell commands to `links.tool_result`; hand the **root thread's** commands to the pipeline's Bash handling too. Commands from child threads are subagents' and are ignored, as for Claude. Combined with the file scan this gives Codex the documents, the task progress, and PR detection, but phase changes arrive at the end of a turn and review/verify may be skipped over. That coarseness is accepted.
+Codex does not report skill use. `codex_session.observe` already hands each finished turn's successful shell commands to `links.tool_result`; hand the **root thread's** commands to the pipeline's Bash handling too. Commands from child threads are subagents' and are ignored, as for Claude. A turn that had already finished when the bridge first saw its thread (after a restart) is a replay and is not fed either. Combined with the file scan this gives Codex the documents, the task progress, and PR detection, but phase changes arrive at the end of a turn and review/verify may be skipped over. That coarseness is accepted.
 
 ### PR and CI
 
@@ -150,7 +150,7 @@ Per-task progress comes only from the subagent-driven flow's `sdd-workspace`, `t
 
 - A task is inferred to be the active one only when the run has a workspace or some task has already started. Otherwise every task row shows as to come, the tasks phase shows as running and is never slow, and there is no finish estimate; the summary line reads "No estimate yet".
 - The run still moves on: `finishing-a-development-branch`, `gh pr create` and the PR checks advance it without waiting for tasks. Final review and verify stay gated on every task being done, so they are skipped in these runs.
-- Once the tasks phase is done, tasks that were never individually completed are drawn as done, without times.
+- Once the tasks phase is done, tasks that were never individually completed are drawn as done, without times, and the phase reads "N of N". In a run that does track tasks, a task the ledger never completed stays "to come" instead, so the count and the rows always agree.
 
 ### When a run ends or goes quiet
 
@@ -158,7 +158,7 @@ Per-task progress comes only from the subagent-driven flow's `sdd-workspace`, `t
 
 A run can stop short of merged: a branch finished without a PR, an abandoned brainstorm, a PR left open. Two things bound that (Call):
 
-- **Mark complete freezes the run.** For a completed workstream the timeline shows what happened and nothing else: no needs-you or slow marks, no estimates, and its PR is no longer polled. Completed workstreams are not scanned for documents and never get a new run. Reopening the workstream brings the run back to life.
+- **Mark complete freezes the run.** For a completed workstream the timeline shows what happened and nothing else: no needs-you or slow marks, no estimates, no times on steps that were still in progress, and its PR is no longer polled. A run whose PR was closed still says "PR closed without merging". Completed workstreams are not scanned for documents and never get a new run. Reopening the workstream brings the run back to life.
 - **Clear Pipeline.** A context-menu item on the section header removes the workstream's run (the app's version of the mod's `/pipeline reset`). The documents stay listed; the timeline returns when a new run starts.
 
 ## Which documents belong to a workstream
@@ -166,9 +166,9 @@ A run can stop short of merged: a branch finished without a PR, an abandoned bra
 **Call:** only documents created in this workstream. A file under `docs/superpowers/specs` or `docs/superpowers/plans` belongs if either holds:
 
 1. A Write or Edit to it was observed from one of the workstream's Claude terminals (any path, also outside the scanned directories' root).
-2. A scan found it **untracked by Git** (ignored files count; so does any file when a directly used folder is not a Git repository), and, for a workstream that uses a folder directly instead of its own worktree, modified after the workstream was created. If Git cannot answer (a timeout, a missing `git`), the scan adopts nothing and tries again on the next refresh.
+2. A scan found it **untracked by Git** (ignored files count; so does any file when a directly used folder is not a Git repository), and, for a workstream that uses a folder directly instead of its own worktree, modified after the workstream was created. If Git cannot answer (a timeout, a missing `git`), the scan adopts nothing and waits a minute before trying again, so a broken checkout does not cost a Git call on every refresh.
 
-Once a document belongs it stays listed for as long as the file exists, including after it is committed.
+Once a document belongs it stays listed for as long as the file exists, including after it is committed. A file is identified by its real path, so a symlinked spelling never lists it twice.
 
 Untracked is the test on purpose. Comparing against the commit the branch started from would also pick up other people's specs after a merge or rebase from the main branch, and a pull in a shared checkout would do the same to a modification-time test; neither produces untracked files. The cost is accepted: a document that a Codex terminal both creates and commits while Muxteroid is not running is missed. Workstreams that share one plain folder also share its new documents.
 
