@@ -1,4 +1,5 @@
 """Private command bridge used by the Mac app and per-session Claude hooks."""
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -24,6 +25,8 @@ import workstream_links as links
 import subagents
 import agent_navigation
 import codex_session
+import manager
+import manager_store
 
 ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -60,8 +63,18 @@ def database():
     db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
     subagents.initialize(db)
+    manager_store.initialize(db)
     trace.record("activity database ready")
     return db
+
+
+@contextlib.contextmanager
+def bridge_lock():
+    with (ROOT/"bridge.lock").open("a") as lock:
+        trace.record("waiting for bridge.lock")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        trace.record("acquired bridge.lock")
+        yield
 
 
 PROVIDERS = {"claude": "Claude", "codex": "Codex", "shell": "Terminal"}
@@ -280,45 +293,59 @@ def hook(key, sid):
     event = json.load(sys.stdin)
     if event.get("session_id") != sid:
         return
-    if event["hook_event_name"] == "PostToolUse":
-        with database() as db:
-            links.tool_result(db, key, event.get("tool_name", ""), event.get("tool_input", {}),
-                              event.get("tool_response", ""), event.get("cwd"), live=True)
-    if event.get("agent_id"):
-        with database() as db:
-            subagents.record(db, key, sid, event)
-        return
+    # First, with no connection open here: a review may consult the manager for minutes.
+    try:
+        outcome = manager.review(sys.modules[__name__], key, sid, event)
+    except Exception as error:
+        trace.record(f"manager review failed type={type(error).__name__}")
+        outcome = manager.NOTHING
     name = event["hook_event_name"]
     tool = event.get("tool_name", "")
-    state, detail = {
-        "SessionStart": ("Ready", "Claude is ready for a prompt."),
-        "UserPromptSubmit": ("Working", "Claude is working on your request."),
-        "PermissionRequest": ("Needs you", f"Permission requested for {tool}."),
-        "PreToolUse": ("Needs you", f"Claude is waiting for {tool}."),
-        "Notification": ("Needs you", event.get("message", "Permission requested.")),
-        "PostToolUse": ("Working", "Claude is continuing."),
-        "PostToolUseFailure": ("Working", "Claude is continuing after a tool error."),
-        "Stop": ("Review", event.get("last_assistant_message") or "Claude finished its turn."),
-        "StopFailure": ("Needs you", event.get("error_details") or "Claude stopped with an error."),
-    }[name]
-    with database() as db:
-        db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
-                   (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"), key, sid))
-
-    if name in ("SessionStart", "UserPromptSubmit"):
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": name, "additionalContext": agent_context(key, name)
-        }}))
+    # PreToolUse fires for every tool; only questions and plans wait for the user.
+    waits = name != "PreToolUse" or tool in manager.REVIEWED_TOOLS
+    if name == "PostToolUse":
+        with database() as db:
+            links.tool_result(db, key, tool, event.get("tool_input", {}),
+                              event.get("tool_response", ""), event.get("cwd"), live=True)
+    if event.get("agent_id"):
+        if waits and outcome.output is None:
+            with database() as db:
+                subagents.record(db, key, sid, event)
+    elif outcome.state or waits:
+        state, detail = (outcome.state, outcome.detail or "") if outcome.state else {
+            "SessionStart": ("Ready", "Claude is ready for a prompt."),
+            "UserPromptSubmit": ("Working", "Claude is working on your request."),
+            "PermissionRequest": ("Needs you", f"Permission requested for {tool}."),
+            "PermissionDenied": ("Working", manager.CONTINUING),
+            "PreToolUse": ("Needs you", f"Claude is waiting for {tool}."),
+            "Notification": ("Needs you", event.get("message", "Permission requested.")),
+            "PostToolUse": ("Working", "Claude is continuing."),
+            "PostToolUseFailure": ("Working", "Claude is continuing after a tool error."),
+            "Stop": ("Review", event.get("last_assistant_message") or "Claude finished its turn."),
+            "StopFailure": ("Needs you", event.get("error_details") or "Claude stopped with an error."),
+        }[name]
+        with database() as db:
+            db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
+                       (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"), key, sid))
+        if name in ("SessionStart", "UserPromptSubmit"):
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": name, "additionalContext": agent_context(key, name)
+            }}))
+    if outcome.output is not None:
+        print(json.dumps(outcome.output))
 
 
 def settings(key, sid):
     command = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook", key, sid])
     hooks = {}
-    for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "Notification",
-                  "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure", "SubagentStart", "SubagentStop"):
+    # Hooks the manager may review wait for its consult.
+    timeouts = {"PermissionRequest": 180, "PermissionDenied": 180, "PreToolUse": 180, "Stop": 300}
+    for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PermissionDenied", "PreToolUse",
+                  "Notification", "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure",
+                  "SubagentStart", "SubagentStop"):
         item = {"hooks": [{"type": "command", "command": command}]}
-        if event == "PreToolUse":
-            item["matcher"] = "AskUserQuestion|ExitPlanMode"
+        if event in timeouts:
+            item["hooks"][0]["timeout"] = timeouts[event]
         if event == "Notification":
             item["matcher"] = "permission_prompt|elicitation_dialog"
         hooks[event] = [item]
@@ -581,10 +608,7 @@ def main(action, *args):
             trace.record("handing terminal to tmux")
             os.execvp("tmux", LEGACY_TMUX + ["attach-session", "-t", "=" + key])
         raise ValueError("The terminal exited. Start it again to resume the workstream.")
-    with (ROOT/"bridge.lock").open("a") as lock:
-        trace.record("waiting for bridge.lock")
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        trace.record("acquired bridge.lock")
+    with bridge_lock():
         if action == "list":
             print(json.dumps(streams()))
         elif action == "create":

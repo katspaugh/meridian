@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Sources"))
 with tempfile.TemporaryDirectory() as home:
     with patch.dict(os.environ, MUXTEROID_HOME=home):
         import streams
+REVIEW = streams.manager.review
 
 
 class WorkstreamTerminalsTests(unittest.TestCase):
@@ -34,10 +35,12 @@ class WorkstreamTerminalsTests(unittest.TestCase):
             patch.object(streams, "bd", side_effect=self.bd),
             patch.object(streams, "terminals", side_effect=lambda: self.live.copy()),
             patch.object(streams, "legacy_sessions", return_value=set()),
+            patch.object(streams.manager, "review", return_value=streams.manager.NOTHING),
         ]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)
+        self.review = streams.manager.review
 
     def bd(self, *args):
         if args[0] == "show":
@@ -178,6 +181,150 @@ class WorkstreamTerminalsTests(unittest.TestCase):
             extra = db.execute("SELECT state,detail FROM activity WHERE id=?", (key,)).fetchone()
         self.assertEqual(original, 'Working')
         self.assertEqual(extra, ('Review', 'Done'))
+
+    def run_hook(self, key, sid, **event):
+        out = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(dict(dict(session_id=sid), **event)))), \
+             contextlib.redirect_stdout(out):
+            streams.hook(key, sid)
+        return out.getvalue()
+
+    def activity(self, key):
+        with streams.database() as db:
+            return db.execute("SELECT state,detail FROM activity WHERE id=?", (key,)).fetchone()
+
+    def subagent_state(self, key, agent):
+        with streams.database() as db:
+            return db.execute("SELECT state FROM agents WHERE stream=? AND agent=?", (key, agent)).fetchone()[0]
+
+    def test_plain_tool_call_does_not_ask_for_attention(self):
+        key = self.register(provider="claude", state="Working", detail="Claude is continuing.", sid="sid")
+        self.run_hook(key, "sid", hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": "ls"})
+        self.assertEqual(self.activity(key), ("Working", "Claude is continuing."))
+
+    def test_question_still_needs_you_when_the_manager_does_nothing(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.assertEqual(self.run_hook(key, "sid", hook_event_name="PreToolUse", tool_name="AskUserQuestion",
+                                       tool_input={}), "")
+        self.assertEqual(self.activity(key), ("Needs you", "Claude is waiting for AskUserQuestion."))
+
+    def test_unreviewed_permission_request_still_needs_you(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.review.return_value = streams.manager.NOTHING
+        self.run_hook(key, "sid", hook_event_name="PermissionRequest", tool_name="Bash", tool_input={})
+        self.assertEqual(self.activity(key)[0], "Needs you")
+
+    def test_manager_decision_is_printed_and_sets_the_state(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.review.return_value = streams.manager.Outcome({"decision": "block", "reason": "Carry on."}, "Working", "Sent it on.")
+        out = self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done?")
+        self.assertEqual(json.loads(out), {"decision": "block", "reason": "Carry on."})
+        self.assertEqual(self.activity(key), ("Working", "Sent it on."))
+        bridge, terminal, sid, event = self.review.call_args.args
+        self.assertIs(bridge, streams)
+        self.assertEqual((terminal, sid, event["hook_event_name"]), (key, "sid", "Stop"))
+
+    def test_manager_ask_sets_needs_you_without_output(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.review.return_value = streams.manager.Outcome(None, "Needs you", "Pick one")
+        self.assertEqual(self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done?"), "")
+        self.assertEqual(self.activity(key), ("Needs you", "Pick one"))
+
+    def test_failed_review_keeps_todays_behavior(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.review.side_effect = RuntimeError("boom")
+        self.assertEqual(self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done?"), "")
+        self.assertEqual(self.activity(key), ("Review", "Done?"))
+
+    def test_approved_tool_call_is_printed_without_changing_the_state(self):
+        key = self.register(provider="claude", state="Working", detail="Claude is continuing.", sid="sid")
+        allow = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}
+        self.review.return_value = streams.manager.Outcome(allow, None, None)
+        out = self.run_hook(key, "sid", hook_event_name="PreToolUse", tool_name="Bash", tool_input={})
+        self.assertEqual(json.loads(out), allow)
+        self.assertEqual(self.activity(key), ("Working", "Claude is continuing."))
+
+    def test_unreviewed_denial_clears_the_reviewing_line(self):
+        key = self.register(provider="claude", state="Working",
+                            detail="The manager is reviewing a permission request for Bash.", sid="sid")
+        self.review.side_effect = RuntimeError("boom")
+        self.run_hook(key, "sid", hook_event_name="PermissionDenied", tool_name="Bash", tool_input={}, reason="[Scope]")
+        self.assertEqual(self.activity(key), ("Working", "Claude is continuing after auto mode blocked an action."))
+
+    def test_prompt_is_reviewed_and_still_receives_agent_context(self):
+        key = self.register(provider="claude", state="Ready", sid="sid")
+        out = json.loads(self.run_hook(key, "sid", hook_event_name="UserPromptSubmit", prompt="Go"))
+        self.assertIn("Beads", out["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.review.call_args.args[3]["prompt"], "Go")
+        self.assertEqual(self.activity(key)[0], "Working")
+
+    def test_stale_session_is_not_reviewed(self):
+        key = self.register(provider="claude", sid="sid")
+        self.run_hook(key, "sid", session_id="stale", hook_event_name="Stop")
+        self.review.assert_not_called()
+
+    def test_subagent_tool_call_does_not_ask_for_attention(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.run_hook(key, "sid", hook_event_name="SubagentStart", agent_id="a1", agent_type="Explore")
+        self.run_hook(key, "sid", hook_event_name="PreToolUse", agent_id="a1", tool_name="Bash", tool_input={})
+        self.assertEqual(self.subagent_state(key, "a1"), "Working")
+        self.run_hook(key, "sid", hook_event_name="PreToolUse", agent_id="a1", tool_name="AskUserQuestion", tool_input={})
+        self.assertEqual(self.subagent_state(key, "a1"), "Needs you")
+        self.assertEqual(self.activity(key)[0], "Working")
+
+    def test_subagent_decided_by_the_manager_is_not_marked_needs_you(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        allow = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}
+        self.run_hook(key, "sid", hook_event_name="SubagentStart", agent_id="a1", agent_type="Explore")
+        self.review.return_value = streams.manager.Outcome(allow, None, None)
+        out =self.run_hook(key, "sid", hook_event_name="PermissionRequest", agent_id="a1", tool_name="Bash", tool_input={})
+        self.assertEqual(json.loads(out), allow)
+        self.assertEqual(self.subagent_state(key, "a1"), "Working")
+
+    def test_manager_reviews_through_the_real_bridge(self):
+        key = self.register(key=self.parent['id'], provider="claude", state="Working", detail="Claude is continuing.", sid="sid")
+        self.review.side_effect = REVIEW
+        call = dict(tool_name="Bash", tool_input={"command": "make"})
+        with streams.database() as db:
+            streams.manager_store.approve(db, key, "Bash", call["tool_input"])
+        with patch.object(streams.manager.brain, "consult", return_value=None) as consult:
+            out = self.run_hook(key, "sid", hook_event_name="PreToolUse", **call)
+            self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "allow")
+            self.run_hook(key, "sid", hook_event_name="PostToolUse", tool_response="", **call)
+            self.assertEqual(self.run_hook(key, "sid", hook_event_name="PreToolUse", **call), "")
+            self.assertEqual(self.activity(key), ("Working", "Claude is continuing."))
+            self.assertEqual(self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done?"), "")
+        consult.assert_called_once()
+        self.assertIn("Title, links and tasks", consult.call_args.args[2])
+        self.assertEqual(consult.call_args.kwargs["folders"], [str(self.folder)])
+        self.assertEqual(self.activity(key), ("Review", "Done?"))
+
+    def test_settings_register_the_manager_hooks(self):
+        hooks = json.loads(streams.settings("k", "s"))["hooks"]
+        self.assertIn("PermissionDenied", hooks)
+        self.assertNotIn("matcher", hooks["PreToolUse"][0])
+        self.assertEqual(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 180)
+        self.assertEqual(hooks["PermissionDenied"][0]["hooks"][0]["timeout"], 180)
+        self.assertEqual(hooks["PreToolUse"][0]["hooks"][0]["timeout"], 180)
+        self.assertEqual(hooks["Stop"][0]["hooks"][0]["timeout"], 300)
+        self.assertNotIn("timeout", hooks["PostToolUse"][0]["hooks"][0])
+        self.assertEqual(hooks["Notification"][0]["matcher"], "permission_prompt|elicitation_dialog")
+
+    def test_database_has_the_manager_tables(self):
+        with streams.database() as db:
+            db.execute("SELECT count(*) FROM manager_events").fetchone()
+
+    def test_bridge_lock_is_exclusive_and_released(self):
+        def try_lock():
+            with (self.root / "bridge.lock").open("a") as other:
+                try:
+                    streams.fcntl.flock(other, streams.fcntl.LOCK_EX | streams.fcntl.LOCK_NB)
+                    return True
+                except BlockingIOError:
+                    return False
+        with streams.bridge_lock():
+            self.assertFalse(try_lock())
+        self.assertTrue(try_lock())
 
     def test_links_and_subagents_remain_associated_with_the_workstream(self):
         key = self.register()
