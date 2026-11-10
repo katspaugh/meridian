@@ -39,7 +39,7 @@ For Git repositories, creating a workstream automatically creates a fresh `muxte
 - **See the sprint board.** Click **Sprint board** in the sidebar or press **⇧⌘B** to see all workstreams and their Beads tasks grouped by status. Search streams or tasks, hide completed workstreams, and click a task or stream to open its terminal. The board updates as agents maintain their tasks.
 - **Follow the plan.** Each agent uses [Beads](https://github.com/gastownhall/beads) to track subtasks, dependencies, and blockers under the workstream. The inspector shows progress. Press **⌥⌘I** to give the terminal the full width.
 - **Check account usage.** The bottom bar shows Claude and Codex usage percentages and reset countdowns directly. Hover for window labels or click refresh. Muxteroid queries Claude Code for current limits, falling back to recent measurements if needed. If Claude shows “Sign in,” run `claude auth login` in your terminal, then refresh.
-- **Jump to related work.** The bottom bar collects GitHub PRs and Linear issues from agent activity. The links stay with the stream when you reopen it.
+- **Jump to related work.** Muxteroid collects GitHub PRs and Linear issues from agent activity. Pull requests appear under **Changes** in the inspector with their title, lines added and removed, and check status: a green dot once every check passes, red when one fails, and a finished count such as 5/6 while checks run. Click a row to open the PR, or use **…** to copy its link. Details come from the GitHub CLI, so install and sign in to [`gh`](https://cli.github.com); without it each PR is a plain link. Linear issues stay in the bottom bar. The links stay with the stream when you reopen it.
 
 ## How it runs
 

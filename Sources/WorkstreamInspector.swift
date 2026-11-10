@@ -5,10 +5,14 @@ struct WorkstreamInspector: View {
     let stream: Stream
     let terminal: WorkstreamTerminal?
     let busy: Bool
+    let pulls: [String: PullRequest]
+    let refreshPulls: ([URL]) async -> Void
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
     @State private var confirmingCompletion = false
     private var unfinishedTasks: [BeadsTask] { stream.tasks.filter { $0.status != "closed" } }
+    /// Most recently linked first, so the newest work stays above "Show more".
+    private var changes: [WorkstreamLink] { stream.links.filter { $0.kind == "pr" }.reversed() }
 
     @AppStorage("workstreamDetailExpanded") private var detailExpanded = true
 
@@ -43,6 +47,10 @@ struct WorkstreamInspector: View {
                     if stream.tasks.isEmpty { Text("No tasks yet").foregroundStyle(.secondary) }
                     ForEach(groups, id: \.self) { status in
                         taskGroup(status)
+                    }
+                    if !changes.isEmpty {
+                        Divider()
+                        WorkstreamChanges(links: changes, pulls: pulls)
                     }
                     if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
                         Divider()
@@ -99,6 +107,12 @@ struct WorkstreamInspector: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.bar)
+        }
+        .task(id: changes.map(\.url)) {
+            while !Task.isCancelled {
+                await refreshPulls(changes.map(\.url))
+                do { try await Task.sleep(for: .seconds(60)) } catch { break }
+            }
         }
     }
 

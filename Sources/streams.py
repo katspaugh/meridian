@@ -265,7 +265,7 @@ Record discoveries as children and link dependencies with bd dep add BLOCKED PRE
 When marking a task blocked, always record both the specific missing condition and the concrete next action in the same command: bd update CHILD -s blocked --set-metadata blocked_reason="What prevents progress" --set-metadata unblock_action="Exactly what the user should do, where to do it, and how to tell the agent it is ready" --append-notes "Reason and next action". The app displays these fields under Why it’s blocked and To unblock. Use plain language, not internal IDs or vague requests to resolve the blocker. If another task or external event must finish, name it and say whether the user needs to act or just wait. For example: blocked_reason="No workstream has two different live providers to verify the overlapping icons" and unblock_action="In this workstream, use + beside the terminal tabs to add Claude alongside Codex, then tell the agent to verify the sidebar".
 Refresh both fields whenever the blocker changes. When resuming, clear them with bd update CHILD -s in_progress --unset-metadata blocked_reason --unset-metadata unblock_action. Do not mark a task blocked merely because an optional check is pending if you can still make progress.
 Close finished children with bd close CHILD --reason "outcome and verification". Before handing back, reconcile the remaining tasks and leave enough notes to resume.
-When you open or change a PR (including pushing commits), or work with a Linear issue, register its canonical URL for the workstream bar with {link_command} URL. Resolve the PR URL with gh pr view when needed.
+When you open or change a PR (including pushing commits), or work with a Linear issue, register its canonical URL with the workstream by running {link_command} URL. Resolve the PR URL with gh pr view when needed.
 The user owns completion of the parent. Simple questions can be answered directly.
 In these examples, replace bd with the command prefix above."""
     if event == "SessionStart":
@@ -563,6 +563,10 @@ def main(action, *args):
             transcript.seek(0)
             trace.record("opening transcript pager")
             subprocess.run(["/usr/bin/less", "-+F"], stdin=transcript, env=dict(os.environ, LESSSECURE="1"))
+        return
+    if action == "pulls":
+        # Network lookups stay outside bridge.lock so they never delay the list refresh.
+        print(json.dumps(links.pull_details(args)))
         return
     if action == "link":
         key, url = args

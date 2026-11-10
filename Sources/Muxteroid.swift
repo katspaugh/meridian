@@ -138,7 +138,15 @@ enum Bridge {
     @Published var busy = false
     @Published var error = ""
     @Published var loadError = ""
+    @Published var pulls = [String: PullRequest]()
     private var refreshID = 0
+    /// Merged pull requests no longer change, so only the others are looked up again.
+    func refreshPulls(_ urls: [URL]) async {
+        let pending = urls.map(\.absoluteString).filter { pulls[$0]?.state != "MERGED" }
+        guard !pending.isEmpty, let data = try? await Bridge.run(["pulls"] + pending),
+              let found = try? JSONDecoder().decode([String: PullRequest].self, from: data) else { return }
+        pulls.merge(found) { _, new in new }
+    }
     func refresh(traced: Bool = false) async {
         refreshID += 1
         let id = refreshID
@@ -533,15 +541,17 @@ struct Dashboard: View {
                                 inspector(stream).id(stream.id).frame(minWidth: 218, idealWidth: 285, maxWidth: 410)
                             }
                         }
-                        if !stream.links.isEmpty {
+                        // Pull requests are listed under Changes in the inspector.
+                        let issues = stream.links.filter { $0.kind != "pr" }
+                        if !issues.isEmpty {
                             Divider()
                             ScrollView(.horizontal) {
                                 HStack(spacing: 14) {
-                                    ForEach(stream.links) { item in
+                                    ForEach(issues) { item in
                                         Link(destination: item.url) {
-                                            Label(item.label, systemImage: item.kind == "pr" ? "arrow.triangle.pull" : "circle.hexagongrid")
+                                            Label(item.label, systemImage: "circle.hexagongrid")
                                         }
-                                        .accessibilityLabel((item.kind == "pr" ? "Pull request " : "Linear issue ") + item.label)
+                                        .accessibilityLabel("Linear issue " + item.label)
                                         .help(item.url.absoluteString)
                                     }
                                 }.font(.callout).padding(.horizontal, 12).padding(.vertical, 7)
@@ -619,7 +629,8 @@ struct Dashboard: View {
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, terminal: selectedTerminal(stream), busy: store.busy) { keepTasksOpen in
+        WorkstreamInspector(stream: stream, terminal: selectedTerminal(stream), busy: store.busy,
+                            pulls: store.pulls, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
