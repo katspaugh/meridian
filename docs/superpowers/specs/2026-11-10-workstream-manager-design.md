@@ -118,7 +118,7 @@ A **Manager** entry at the top of the sidebar, above Sprint board, with a badge 
 3. **Decisions and activity.** Everything the manager did, newest first, each with its reason: permissions approved or denied, questions answered, product decisions taken, agents redirected. Unread items are marked. This is how the user learns of decisions after the fact.
 4. **Chat.** A box to talk to the manager.
 
-A pause switch sits in the view's header. Paused, every hook behaves as it does today.
+A pause switch sits in the view's header. Paused, every hook behaves as it does today. The manager starts paused, so it does nothing until the user switches it on once.
 
 In a workstream's inspector, an open question from the manager appears above the task list.
 
