@@ -551,6 +551,28 @@ def main(action, *args):
         return
     if action == "hook":
         return hook(*args)
+    # The manager's actions take bridge.lock only around their snapshot: a sweep or chat consults for minutes.
+    if action == "manager-state":
+        print(json.dumps(manager.state(sys.modules[__name__])))
+        return
+    if action == "manager-sweep":
+        return manager.sweep(sys.modules[__name__], (args[0] if args else None) or None)
+    if action == "manager-chat":
+        text, = args
+        return manager.chat(sys.modules[__name__], text)
+    if action in ("manager-pause", "manager-dismiss", "manager-seen"):
+        with database() as db:
+            if action == "manager-pause":
+                value, = args
+                if value not in ("0", "1"):
+                    raise ValueError("Use manager-pause 0 or 1.")
+                manager_store.set_setting(db, "paused", value)
+            elif action == "manager-dismiss":
+                ask, = args
+                manager_store.resolve_asks(db, ask_id=int(ask))
+            else:
+                manager_store.mark_seen(db)
+        return
     if action == "terminal-run":
         return run_terminal(args[0], list(args[1:]))
     if action == "codex-run":

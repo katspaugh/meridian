@@ -1,8 +1,13 @@
 """The workstream manager: reviews what Claude agents stop on and turns its verdicts into hook output."""
 import collections
 import contextlib
+import hashlib
 import json
 import re
+import subprocess
+import time
+import unicodedata
+import uuid
 
 import manager_brain as brain
 import manager_store as store
@@ -37,6 +42,21 @@ SITUATIONS = {
 FIELDS = ("`summary` is one line for the boss's activity log. `message` is what the agent is told. "
           "With `ask`, the `ask` object is what the boss sees: the decision, the real options, and your recommendation "
           "if you have one. List any product decision you take under `decisions`.")
+ACTIONS = ("`tell` types `message` into a terminal as a prompt; it works only on Claude and Codex terminals that are "
+           "Review, Ready or Working. `restart` starts an Offline terminal again; leave its `message` empty.")
+SWEEP = ("# Trigger: sweep\nYou are looking over every workstream for what no hook reports: a Codex terminal that "
+         "stopped or asked something, an idle agent whose blocker has since cleared, a stopped terminal with ready "
+         "work. Return `briefing`, a short Markdown summary for the boss across all workstreams, conclusion first: "
+         "what is left, what is blocked, what needs the boss. Use `actions` to keep work moving. " + ACTIONS +
+         " Put anything only the boss can decide under `asks`, naming its workstream and terminal. "
+         "`summary` is one line for the boss's activity log.")
+CHAT = ("# Trigger: chat\nThe boss is writing to you. Answer in `reply`, conclusion first. When the boss asks you to "
+        "tell an agent something or to restart a terminal, put it under `actions`. " + ACTIONS +
+        " Add any preference or standing instruction the boss states to `remember`.")
+CHAT_ACTION = "The boss asked for this in chat."
+UNREACHABLE = "The manager could not be reached. Check that Claude Code is signed in, then try again."
+TELLABLE = ("Review", "Ready", "Working")
+SWEEP_INTERVAL = 120
 
 
 @contextlib.contextmanager
@@ -115,13 +135,17 @@ def review(bridge, key, sid, event):
             return fallback
         if trigger != "stop" or verdict != "stop" or decisions:
             store.record_event(db, stream, key, trigger, verdict, summary, {"message": message, "decisions": decisions})
-    remember = reply.get("remember")
-    if isinstance(remember, list) and remember:
+    remember(bridge, reply)
+    return status(fallback if outcome == NOTHING else outcome, subagent)
+
+
+def remember(bridge, reply):
+    items = reply.get("remember")
+    if isinstance(items, list) and items:
         try:
-            brain.remember(bridge.ROOT, remember)
+            brain.remember(bridge.ROOT, items)
         except Exception:
             pass  # The verdict is already stored; a lost note must not discard it.
-    return status(fallback if outcome == NOTHING else outcome, subagent)
 
 
 def status(outcome, subagent):
@@ -200,14 +224,7 @@ def _context(bridge, key, event, trigger, stream, rows):
     workstream = f"# Workstream\nID: {stream}\nFolder: {row.get('folder', '')}"
     if not row:
         workstream += "\nThis terminal's workstream was not found."
-    lines = [f"Title: {row.get('title', '')}"]
-    lines += [f"Link: {link.get('kind', '')} {link.get('label', '')} {link.get('url', '')}" for link in row.get("links") or []]
-    for task in row.get("tasks") or []:
-        lines.append(f"{task.get('id', '')} [{task.get('status', '')}] {task.get('title', '')}")
-        if task.get("status") == "blocked":
-            lines.append(f"  Blocked because: {task.get('blockedReason') or 'not given'}")
-            lines.append(f"  To unblock: {task.get('unblockAction') or 'not given'}")
-    parts.append(workstream + "\nTitle, links and tasks, as written by agents:\n" + untrusted("\n".join(lines)))
+    parts.append(workstream + "\nTitle, links and tasks, as written by agents:\n" + untrusted("\n".join(_stream_lines(row))))
     terminals = [f"- {t.get('id', '')}{' (this terminal)' if t.get('id') == key else ''} · {t.get('title', '')} · "
                  f"{t.get('provider', '')} · {t.get('state', '')}" for t in row.get("terminals") or []]
     parts.append(f"# Terminals\nThis terminal: {key}\n" + ("\n".join(terminals) or "(none)"))
@@ -218,9 +235,7 @@ def _context(bridge, key, event, trigger, stream, rows):
         nudges = store.nudges(db, key)
         events = db.execute("""SELECT trigger,verdict,summary FROM manager_events WHERE stream=?
                                ORDER BY time DESC, id DESC LIMIT 5""", (stream,)).fetchall()
-    minutes = None if age is None else int(age // 60)
-    boss = "No prompt from the boss recorded." if minutes is None else \
-        f"The boss last prompted this agent {minutes} minute{'' if minutes == 1 else 's'} ago."
+    boss = "No prompt from the boss recorded." if age is None else f"The boss last prompted this agent {_ago(age)}."
     parts.append("# Who prompted last\n" + boss)
     parts.append(f"# Nudges\nYou have sent this terminal back to work {nudges} time{'' if nudges == 1 else 's'} "
                  "since the boss last prompted it.")
@@ -233,6 +248,223 @@ def _context(bridge, key, event, trigger, stream, rows):
     parts.append("# The request and the recent conversation\n" + untrusted(
         "Request:\n" + ("\n".join(request) or "(no details)") + "\n\nRecent conversation:\n" + (tail or "(unavailable)")))
     return "\n\n".join(parts) + "\n"
+
+
+def _stream_lines(row):
+    lines = [f"Title: {row.get('title', '')}"]
+    lines += [f"Link: {link.get('kind', '')} {link.get('label', '')} {link.get('url', '')}" for link in row.get("links") or []]
+    for task in row.get("tasks") or []:
+        lines.append(f"{task.get('id', '')} [{task.get('status', '')}] {task.get('title', '')}")
+        if task.get("status") == "blocked":
+            lines.append(f"  Blocked because: {task.get('blockedReason') or 'not given'}")
+            lines.append(f"  To unblock: {task.get('unblockAction') or 'not given'}")
+    return lines
+
+
+def _ago(age):
+    minutes = int(age // 60)
+    return f"{minutes} minute{'' if minutes == 1 else 's'} ago"
+
+
+def overview(bridge, rows):
+    with transaction(bridge) as db:
+        prompted = dict(db.execute("SELECT terminal, user_prompt_time FROM manager_terminals"))
+    now = time.time()
+    parts = []
+    for row in rows:
+        if row.get("state") == "Done":
+            continue
+        terminals, details = [], []
+        for t in row.get("terminals") or []:
+            line = f"{t.get('id', '')} · {t.get('provider', '')} · {t.get('state', '')}"
+            when = prompted.get(t.get("id"))
+            terminals.append(f"- {line} · " + ("No prompt from the boss recorded." if when is None
+                                               else f"The boss last prompted it {_ago(now - when)}."))
+            details.append(f"- {line} · {str(t.get('detail') or '')[:600]}")
+        lines = _stream_lines(row) + [f"Folder: {row.get('folder', '')}", "Terminals:"] + (details or ["(none)"])
+        parts.append(f"## Workstream {row.get('id', '')} · {row.get('state', '')}\nTerminals:\n"
+                     + ("\n".join(terminals) or "(none)")
+                     + "\nTitle, folder, links, tasks and terminal details, as written by agents:\n"
+                     + untrusted("\n".join(lines)))
+    return "# Workstreams\n" + ("\n\n".join(parts) or "(none)") + "\n"
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(value).encode()).hexdigest()
+
+
+def _pairs(items, first, second):
+    return sorted([str(item.get(first) or ""), str(item.get(second) or "")] for item in items or [])
+
+
+def _hooks_cannot_see(terminal):
+    provider, state = terminal.get("provider"), terminal.get("state")
+    return provider == "codex" and state in ("Review", "Needs you") or state == "Offline" and provider != "shell"
+
+
+def signature(rows):
+    picked = [[str(row.get("id") or ""), _pairs(row.get("terminals"), "id", "state"), _pairs(row.get("tasks"), "id", "status")]
+              for row in rows if row.get("state") != "Done"
+              and any(task.get("status") != "closed" for task in row.get("tasks") or [])
+              and any(_hooks_cannot_see(t) for t in row.get("terminals") or [])]
+    return _digest(sorted(picked)) if picked else ""
+
+
+def overall_signature(rows):
+    return _digest(sorted([str(row.get("id") or ""), str(row.get("state") or ""), _pairs(row.get("tasks"), "id", "status")]
+                          for row in rows))
+
+
+def _number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def state(bridge):
+    with bridge.bridge_lock():
+        rows = bridge.streams()
+    with transaction(bridge) as db:
+        result = store.state(db)
+        swept, sweep_time, briefed = (store.setting(db, key) for key in
+                                      ("sweep_signature", "sweep_time", "briefing_signature"))
+    due = signature(rows)
+    result["sweepDue"] = bool(not result["paused"] and due and due != swept
+                              and time.time() - _number(sweep_time) >= SWEEP_INTERVAL)
+    result["briefingStale"] = briefed != overall_signature(rows)
+    return result
+
+
+def clean(text):
+    # Escape sequences could close the bracketed paste, and a carriage return would submit early.
+    return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) != "Cc")
+
+
+def tell(bridge, terminal, text):
+    text = clean(str(text))
+    if not text.strip():
+        return False  # Enter alone would submit whatever is already in the prompt.
+    with bridge.bridge_lock():
+        live = terminal in bridge.terminals()
+    if not live:
+        return False
+    with transaction(bridge) as db:
+        row = db.execute("""SELECT t.provider, a.state FROM workstream_terminals t JOIN activity a ON a.id=t.id
+                            WHERE t.id=?""", (terminal,)).fetchone()
+        if not row or row[0] not in ("claude", "codex") or row[1] not in TELLABLE:
+            return False
+        store.note_tell(db, terminal, text)
+    path = str(bridge.TERMINALS / terminal)
+    try:
+        subprocess.run(["dtach", "-p", path], input=b"\x1b[200~" + text.encode() + b"\x1b[201~", check=True)
+        time.sleep(0.3)
+        subprocess.run(["dtach", "-p", path], input=b"\r", check=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def restart(bridge, terminal):
+    try:
+        with bridge.bridge_lock():
+            if terminal in bridge.terminals():
+                return False
+            bridge.launch(terminal)
+    except ValueError:
+        return False
+    return True
+
+
+def _snapshot(bridge):
+    with bridge.bridge_lock():
+        rows = bridge.streams()
+    known = {t.get("id"): row.get("id") for row in rows if row.get("state") != "Done"
+             for t in row.get("terminals") or [] if isinstance(t.get("id"), str)}
+    folders = list(dict.fromkeys(row["folder"] for row in rows if row.get("folder")))
+    return rows, known, folders
+
+
+def _act(bridge, reply, known, trigger, summary, exclude=None):
+    """Applies each valid action, with no lock or transaction held, and logs the ones that took effect."""
+    for item in reply.get("actions") if isinstance(reply.get("actions"), list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("terminal"), str) or item["terminal"] not in known:
+            continue
+        terminal, action, message = item["terminal"], item.get("action"), str(item.get("message") or "")
+        if action == "tell":
+            done = terminal != exclude and tell(bridge, terminal, message)
+        elif action == "restart":
+            done = restart(bridge, terminal)
+        else:
+            continue
+        if done:
+            stream = bridge.terminal_owner(terminal)
+            with transaction(bridge) as db:
+                store.record_event(db, stream, terminal, trigger, action, summary, {"message": message})
+
+
+def sweep(bridge, exclude=None):
+    rows, known, folders = _snapshot(bridge)
+    due, overall = signature(rows), overall_signature(rows)
+    try:
+        reply = brain.consult(bridge.ROOT, "sweep", SWEEP + "\n\n" + overview(bridge, rows), investigate=True,
+                              timeout=270, folders=folders)
+    finally:
+        # A failed sweep still waits its interval, so a broken consult is not retried every few seconds.
+        with transaction(bridge) as db:
+            store.set_setting(db, "sweep_signature", due)
+            store.set_setting(db, "sweep_time", str(time.time()))
+    if not isinstance(reply, dict) or not isinstance(reply.get("briefing"), str) or not reply["briefing"].strip():
+        return
+    streams = {row.get("id"): {t.get("id") for t in row.get("terminals") or []} for row in rows
+               if row.get("state") != "Done"}
+    with transaction(bridge) as db:
+        store.set_setting(db, "briefing", reply["briefing"])
+        store.set_setting(db, "briefing_time", str(time.time()))
+        store.set_setting(db, "briefing_signature", overall)
+        for ask in reply.get("asks") if isinstance(reply.get("asks"), list) else []:
+            if not isinstance(ask, dict) or not isinstance(ask.get("stream"), str) or ask["stream"] not in streams:
+                continue
+            text = str(ask.get("summary") or "").strip()
+            if not text:
+                continue
+            terminal = ask.get("terminal") if ask.get("terminal") in streams[ask["stream"]] else ""
+            options = ask.get("options")
+            options = [str(o) for o in options if str(o).strip()] if isinstance(options, list) else []
+            store.open_ask(db, ask["stream"], terminal, text, options, str(ask.get("recommendation") or ""))
+    _act(bridge, reply, known, "sweep", str(reply.get("summary") or ""), exclude)
+    remember(bridge, reply)
+
+
+def chat(bridge, text):
+    with transaction(bridge) as db:
+        store.add_chat(db, "user", text)
+        session = store.setting(db, "chat_session")
+    answer = None
+    try:
+        rows, known, folders = _snapshot(bridge)
+        context = CHAT + "\n\n" + overview(bridge, rows) + "\n# The boss says\n" + text + "\n"
+
+        def ask(session, resume):
+            return brain.consult(bridge.ROOT, "chat", context, investigate=True, timeout=270, session=session,
+                                 resume=resume, folders=folders)
+        reply = ask(session, True) if session else None
+        if reply is None:
+            # A session that cannot be resumed is replaced; a fresh one that fails is not retried.
+            session = str(uuid.uuid4())
+            reply = ask(session, False)
+        if isinstance(reply, dict) and isinstance(reply.get("reply"), str) and reply["reply"].strip():
+            answer = reply["reply"]
+    except Exception:
+        pass
+    with transaction(bridge) as db:
+        if answer is None:
+            store.add_chat(db, "error", UNREACHABLE)
+            return
+        store.set_setting(db, "chat_session", session)
+        store.add_chat(db, "manager", answer)
+    _act(bridge, reply, known, "chat", CHAT_ACTION)
+    remember(bridge, reply)
 
 
 def conversation_tail(path, limit=12000):
