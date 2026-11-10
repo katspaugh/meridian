@@ -3,14 +3,19 @@ import MarkdownUI
 
 struct WorkstreamInspector: View {
     let stream: Stream
+    let asks: [ManagerAsk]
     let terminal: WorkstreamTerminal?
     let busy: Bool
     let clearPipeline: () -> Void
+    let pulls: [String: PullRequest]
+    let refreshPulls: ([URL]) async -> Void
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
     @Environment(\.openWindow) private var openWindow
     @State private var confirmingCompletion = false
     private var unfinishedTasks: [BeadsTask] { stream.tasks.filter { $0.status != "closed" } }
+    /// Most recently linked first, so the newest work stays above "Show more".
+    private var changes: [WorkstreamLink] { stream.links.filter { $0.kind == "pr" }.reversed() }
 
     @AppStorage("workstreamDetailExpanded") private var detailExpanded = true
 
@@ -27,6 +32,7 @@ struct WorkstreamInspector: View {
                 // With a Pipeline section the whole content scrolls, the Tasks header included.
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
+                        if !asks.isEmpty { managerAsks }
                         PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline,
                                         open: { openWindow(id: "document", value: URL(fileURLWithPath: $0.path)) })
                         Divider()
@@ -42,9 +48,12 @@ struct WorkstreamInspector: View {
                 // Without one the Tasks header stays pinned above the scrolling list.
                 tasksHeader.padding(16)
                 ScrollView {
-                    taskList
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16).padding(.bottom, 16)
+                    VStack(alignment: .leading, spacing: 22) {
+                        if !asks.isEmpty { managerAsks }
+                        taskList
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16).padding(.bottom, 16)
                 }.frame(maxHeight: .infinity)
             }
 
@@ -85,6 +94,12 @@ struct WorkstreamInspector: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.bar)
         }
+        .task(id: changes.map(\.url)) {
+            while !Task.isCancelled {
+                await refreshPulls(changes.map(\.url))
+                do { try await Task.sleep(for: .seconds(60)) } catch { break }
+            }
+        }
     }
 
     private var tasksHeader: some View {
@@ -112,6 +127,10 @@ struct WorkstreamInspector: View {
             ForEach(groups, id: \.self) { status in
                 taskGroup(status)
             }
+            if !changes.isEmpty {
+                Divider()
+                WorkstreamChanges(links: changes, pulls: pulls)
+            }
             if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
                 Divider()
                 DisclosureGroup(isExpanded: $detailExpanded) {
@@ -127,6 +146,23 @@ struct WorkstreamInspector: View {
                 }
             }
         }
+    }
+
+    private var managerAsks: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle.badge.checkmark").foregroundStyle(.orange)
+                Text("The manager needs your call").fontWeight(.semibold)
+            }
+            ForEach(asks) { ask in
+                if ask.id != asks.first?.id { Divider() }
+                ManagerAskDetails(ask: ask)
+            }
+        }
+        .font(.callout)
+        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+        .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.22)))
     }
 
     private func taskGroup(_ status: String) -> some View {

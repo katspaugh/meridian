@@ -5,7 +5,7 @@ struct SprintBoard: View {
     let openStream: (Stream) -> Void
     let newStream: () -> Void
     @State private var query = ""
-    @State private var includeCompleted = true
+    @State private var includeCompleted = false
 
     private let columnWidth: CGFloat = 230
     private let standardStatuses = ["open", "in_progress", "blocked", "deferred", "closed"]
@@ -64,31 +64,36 @@ struct SprintBoard: View {
             } else if visibleStreams.isEmpty {
                 ContentUnavailableView.search(text: search)
             } else {
-                ScrollView([.horizontal, .vertical]) {
-                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                        Section {
-                            ForEach(visibleStreams) { stream in
-                                lane(stream)
-                                Divider()
-                            }
-                        } header: {
-                            HStack(alignment: .center, spacing: 12) {
-                                Text("Workstream").frame(width: columnWidth, alignment: .leading)
-                                ForEach(statuses, id: \.self) { status in
-                                    HStack {
-                                        Circle().fill(color(status)).frame(width: 7, height: 7)
-                                        Text(name(status))
-                                        Spacer()
-                                        Text("\(visibleStreams.reduce(0) { total, stream in total + tasks(stream).filter { $0.status == status }.count })")
-                                            .foregroundStyle(.secondary).monospacedDigit()
-                                    }.frame(width: columnWidth)
+                GeometryReader { viewport in
+                    ScrollView([.horizontal, .vertical]) {
+                        LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                            Section {
+                                ForEach(visibleStreams) { stream in
+                                    lane(stream)
+                                    Divider()
                                 }
-                            }.font(.callout.weight(.semibold)).padding(16).background(.bar)
+                            } header: {
+                                HStack(alignment: .center, spacing: 12) {
+                                    Text("Workstream").frame(width: columnWidth, alignment: .leading)
+                                    ForEach(statuses, id: \.self) { status in
+                                        HStack {
+                                            Circle().fill(color(status)).frame(width: 7, height: 7)
+                                            Text(name(status))
+                                            Spacer()
+                                            Text("\(visibleStreams.reduce(0) { total, stream in total + tasks(stream).filter { $0.status == status }.count })")
+                                                .foregroundStyle(.secondary).monospacedDigit()
+                                        }.frame(width: columnWidth)
+                                    }
+                                }.font(.callout.weight(.semibold)).padding(16).background(.bar)
+                            }
                         }
+                        // Fill short boards so the scroll view cannot center their rows.
+                        .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .topLeading)
                     }
+                    .defaultScrollAnchor(.topLeading)
                 }
             }
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private func lane(_ stream: Stream) -> some View {

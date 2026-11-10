@@ -8,6 +8,11 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
     @Published var destination: String?
     var terminalDestination: String?
     let store = Store()
+    let manager = ManagerStore()
+    /// The workstream terminal on screen; sweeps never type into it while the app is active.
+    var focusedTerminal: String? { didSet { reportFocus() } }
+    private var reportedFocus: String?
+    private var focusReport: Task<Void, Never>?
     private let center = UNUserNotificationCenter.current()
     private let defaultsKey = "presentedAttentionRequests"
     private let log = Logger(subsystem: "local.muxteroid.app", category: "notifications")
@@ -24,6 +29,22 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         .terminateNow
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) { reportFocus() }
+    func applicationDidResignActive(_ notification: Notification) { reportFocus() }
+
+    /// A sweep consults for minutes, so the bridge re-reads this just before it types.
+    private func reportFocus() {
+        let id = NSApp.isActive ? focusedTerminal ?? "" : ""
+        guard id != reportedFocus else { return }
+        reportedFocus = id
+        // Reports run in order, so an older one never lands last.
+        let previous = focusReport
+        focusReport = Task {
+            await previous?.value
+            _ = try? await Bridge.run(["manager-focus", id])
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task {
             do {
@@ -38,6 +59,11 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
                 if store.loadError.isEmpty {
                     await update(store.rows)
                     pollPipelines()
+                }
+                // A sweep can take minutes, so it runs beside the loop rather than inside it.
+                if await manager.refresh(), manager.state?.sweepDue == true, !manager.sweeping {
+                    let exclude = NSApp.isActive ? focusedTerminal : nil
+                    Task { await manager.sweep(excluding: exclude) }
                 }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }

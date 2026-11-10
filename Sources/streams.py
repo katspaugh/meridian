@@ -1,4 +1,5 @@
 """Private command bridge used by the Mac app and per-session Claude hooks."""
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -25,6 +26,8 @@ import subagents
 import agent_navigation
 import codex_session
 import pipeline_tracker as tracker
+import manager
+import manager_store
 
 ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -62,8 +65,18 @@ def database():
     links.initialize(db)
     subagents.initialize(db)
     tracker.initialize(db)
+    manager_store.initialize(db)
     trace.record("activity database ready")
     return db
+
+
+@contextlib.contextmanager
+def bridge_lock():
+    with (ROOT/"bridge.lock").open("a") as lock:
+        trace.record("waiting for bridge.lock")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        trace.record("acquired bridge.lock")
+        yield
 
 
 PROVIDERS = {"claude": "Claude", "codex": "Codex", "shell": "Terminal"}
@@ -267,7 +280,7 @@ Record discoveries as children and link dependencies with bd dep add BLOCKED PRE
 When marking a task blocked, always record both the specific missing condition and the concrete next action in the same command: bd update CHILD -s blocked --set-metadata blocked_reason="What prevents progress" --set-metadata unblock_action="Exactly what the user should do, where to do it, and how to tell the agent it is ready" --append-notes "Reason and next action". The app displays these fields under Why it’s blocked and To unblock. Use plain language, not internal IDs or vague requests to resolve the blocker. If another task or external event must finish, name it and say whether the user needs to act or just wait. For example: blocked_reason="No workstream has two different live providers to verify the overlapping icons" and unblock_action="In this workstream, use + beside the terminal tabs to add Claude alongside Codex, then tell the agent to verify the sidebar".
 Refresh both fields whenever the blocker changes. When resuming, clear them with bd update CHILD -s in_progress --unset-metadata blocked_reason --unset-metadata unblock_action. Do not mark a task blocked merely because an optional check is pending if you can still make progress.
 Close finished children with bd close CHILD --reason "outcome and verification". Before handing back, reconcile the remaining tasks and leave enough notes to resume.
-When you open or change a PR (including pushing commits), or work with a Linear issue, register its canonical URL for the workstream bar with {link_command} URL. Resolve the PR URL with gh pr view when needed.
+When you open or change a PR (including pushing commits), or work with a Linear issue, register its canonical URL with the workstream by running {link_command} URL. Resolve the PR URL with gh pr view when needed.
 The user owns completion of the parent. Simple questions can be answered directly.
 In these examples, replace bd with the command prefix above."""
     if event == "SessionStart":
@@ -278,55 +291,83 @@ In these examples, replace bd with the command prefix above."""
     return guide
 
 
+def interrupted(signum, frame):
+    raise RuntimeError(f"Interrupted by signal {signum}.")
+
+
 def hook(key, sid):
     event = json.load(sys.stdin)
     if event.get("session_id") != sid:
         return
-    if event["hook_event_name"] == "PostToolUse":
-        with database() as db:
-            links.tool_result(db, key, event.get("tool_name", ""), event.get("tool_input", {}),
-                              event.get("tool_response", ""), event.get("cwd"), live=True)
-    if event.get("agent_id"):
-        with database() as db:
-            subagents.record(db, key, sid, event)
-        return
+    # A hook killed mid-review must still replace the "manager is reviewing" line; unwinding
+    # through subprocess.run also kills the consult.
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, interrupted)
+    # First, with no connection open here: a review may consult the manager for minutes.
+    try:
+        outcome = manager.review(sys.modules[__name__], key, sid, event)
+    except Exception as error:
+        trace.record(f"manager review failed type={type(error).__name__}")
+        outcome = manager.NOTHING
     name = event["hook_event_name"]
     tool = event.get("tool_name", "")
-    state, detail = {
-        "SessionStart": ("Ready", "Claude is ready for a prompt."),
-        "UserPromptSubmit": ("Working", "Claude is working on your request."),
-        "PermissionRequest": ("Needs you", f"Permission requested for {tool}."),
-        "PreToolUse": ("Needs you", f"Claude is waiting for {tool}."),
-        "Notification": ("Needs you", event.get("message", "Permission requested.")),
-        "PostToolUse": ("Working", "Claude is continuing."),
-        "PostToolUseFailure": ("Working", "Claude is continuing after a tool error."),
-        "Stop": ("Review", event.get("last_assistant_message") or "Claude finished its turn."),
-        "StopFailure": ("Needs you", event.get("error_details") or "Claude stopped with an error."),
-    }[name]
-    with database() as db:
-        db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
-                   (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"), key, sid))
+    # PreToolUse fires for every tool; only questions and plans wait for the user.
+    waits = name != "PreToolUse" or tool in manager.REVIEWED_TOOLS
     if name == "PostToolUse":
-        # Subagent events returned above. Its own connection, after the state
-        # update, so a wait on the run's write lock never delays the state.
         with database() as db:
-            tracker.guarded(db, None, tracker.tool_event, db, key, event.get("tool_name", ""),
+            links.tool_result(db, key, tool, event.get("tool_input", {}),
+                              event.get("tool_response", ""), event.get("cwd"), live=True)
+    if event.get("agent_id"):
+        if waits and outcome.output is None:
+            with database() as db:
+                subagents.record(db, key, sid, event)
+    elif outcome.state or waits:
+        state, detail = (outcome.state, outcome.detail or "") if outcome.state else {
+            "SessionStart": ("Ready", "Claude is ready for a prompt."),
+            "UserPromptSubmit": ("Working", "Claude is working on your request."),
+            "PermissionRequest": ("Needs you", f"Permission requested for {tool}."),
+            "PermissionDenied": ("Working", manager.CONTINUING),
+            "PreToolUse": ("Needs you", f"Claude is waiting for {tool}."),
+            "Notification": ("Needs you", event.get("message", "Permission requested.")),
+            "PostToolUse": ("Working", "Claude is continuing."),
+            "PostToolUseFailure": ("Working", "Claude is continuing after a tool error."),
+            "Stop": ("Review", event.get("last_assistant_message") or "Claude finished its turn."),
+            "StopFailure": ("Needs you", event.get("error_details") or "Claude stopped with an error."),
+        }[name]
+        with database() as db:
+            # A permission prompt's notification follows it within seconds, while the manager may still settle it.
+            reviewing = name == "Notification" and str((db.execute(
+                "SELECT detail FROM activity WHERE id=? AND session=?", (key, sid)).fetchone() or [""])[0] or ""
+            ).startswith("The manager is ")
+            if not reviewing:
+                db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
+                           (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"),
+                            key, sid))
+        if name in ("SessionStart", "UserPromptSubmit"):
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": name, "additionalContext": agent_context(key, name)
+            }}))
+    if outcome.output is not None:
+        print(json.dumps(outcome.output))
+    if name == "PostToolUse" and not event.get("agent_id"):
+        # Its own connection, after the state update, so a wait on the run's
+        # write lock never delays the state.
+        with database() as db:
+            tracker.guarded(db, None, tracker.tool_event, db, key, tool,
                             event.get("tool_input") or {}, event.get("tool_response"), time.time())
-
-    if name in ("SessionStart", "UserPromptSubmit"):
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": name, "additionalContext": agent_context(key, name)
-        }}))
 
 
 def settings(key, sid):
     command = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook", key, sid])
     hooks = {}
-    for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "Notification",
-                  "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure", "SubagentStart", "SubagentStop"):
+    # Hooks the manager may review wait for its consult.
+    timeouts = {"PermissionRequest": 180, "PermissionDenied": 180, "PreToolUse": 180, "Stop": 300}
+    for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PermissionDenied", "PreToolUse",
+                  "Notification", "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure",
+                  "SubagentStart", "SubagentStop"):
         item = {"hooks": [{"type": "command", "command": command}]}
-        if event == "PreToolUse":
-            item["matcher"] = "AskUserQuestion|ExitPlanMode"
+        if event in timeouts:
+            item["hooks"][0]["timeout"] = timeouts[event]
         if event == "Notification":
             item["matcher"] = "permission_prompt|elicitation_dialog"
         hooks[event] = [item]
@@ -431,7 +472,8 @@ def streams():
             entries.append(dict(id=tid, title=title, provider=provider, state=state, detail=detail,
                                 live=tid in live, terminalSocket=str(TERMINALS / tid) if tid in attached else None,
                                 session=sid, nativeView=bool(sid and (ROOT/"views"/sid).is_dir()),
-                                agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])]))
+                                agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])
+                                        if a['state'] in ('Working', 'Needs you')]))
         # An idle shell does not mask finished agent work. A working agent does.
         priority = {"Needs you": 0, "Working": 1, "Review": 2, "Ready": 3, "Queued": 4, "Offline": 5}
         representative = min(entries, key=lambda t: priority.get(t['state'], 6)) if entries else dict(state='Ready', detail='Add a terminal to continue this workstream.')
@@ -539,6 +581,31 @@ def main(action, *args):
         return
     if action == "hook":
         return hook(*args)
+    # The manager's actions take bridge.lock only around their snapshot: a sweep or chat consults for minutes.
+    if action == "manager-state":
+        print(json.dumps(manager.state(sys.modules[__name__])))
+        return
+    if action == "manager-sweep":
+        return manager.sweep(sys.modules[__name__], (args[0] if args else None) or None)
+    if action == "manager-chat":
+        text, = args
+        return manager.chat(sys.modules[__name__], text)
+    if action in ("manager-pause", "manager-dismiss", "manager-seen", "manager-focus"):
+        with database() as db:
+            if action == "manager-focus":
+                # The terminal the boss has on screen, or "" when none is or the app is in the background.
+                manager_store.set_setting(db, "focus", args[0] if args else "")
+            elif action == "manager-pause":
+                value, = args
+                if value not in ("0", "1"):
+                    raise ValueError("Use manager-pause 0 or 1.")
+                manager_store.set_setting(db, "paused", value)
+            elif action == "manager-dismiss":
+                ask, = args
+                manager_store.resolve_asks(db, ask_id=int(ask))
+            else:
+                manager_store.mark_seen(db)
+        return
     if action == "terminal-run":
         return run_terminal(args[0], list(args[1:]))
     if action == "codex-run":
@@ -578,6 +645,10 @@ def main(action, *args):
             trace.record("opening transcript pager")
             subprocess.run(["/usr/bin/less", "-+F"], stdin=transcript, env=dict(os.environ, LESSSECURE="1"))
         return
+    if action == "pulls":
+        # Network lookups stay outside bridge.lock so they never delay the list refresh.
+        print(json.dumps(links.pull_details(args)))
+        return
     if action == "link":
         key, url = args
         if not (links.PR.search(url) or links.LINEAR.search(url)):
@@ -606,10 +677,7 @@ def main(action, *args):
             trace.record("handing terminal to tmux")
             os.execvp("tmux", LEGACY_TMUX + ["attach-session", "-t", "=" + key])
         raise ValueError("The terminal exited. Start it again to resume the workstream.")
-    with (ROOT/"bridge.lock").open("a") as lock:
-        trace.record("waiting for bridge.lock")
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        trace.record("acquired bridge.lock")
+    with bridge_lock():
         if action == "list":
             print(json.dumps(streams()))
         elif action == "create":
@@ -633,6 +701,8 @@ if __name__ == "__main__":
         action = sys.argv[1]
         if action in ("open", "attach", "codex-run", "codex-child", "agent-archive", "view-agent"):
             trace.begin(action, sys.argv[2])
+        elif action in ("manager-sweep", "manager-chat"):
+            trace.begin(action, "-")
         elif action == "create" or (action == "list" and os.getenv("MUXTEROID_TRACE_REFRESH") == "1"):
             trace.begin(action, "-")
         main(*sys.argv[1:])
