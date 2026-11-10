@@ -329,7 +329,19 @@ struct Dashboard: View {
                 ZStack(alignment: .leading) {
                     ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
                         AgentIcon(provider: provider)
-                            .background(.background, in: Circle())
+                            .mask {
+                                Rectangle()
+                                    .overlay {
+                                        if index > 0 {
+                                            // Clear the area behind the preceding icon without
+                                            // painting over the sidebar or selection background.
+                                            Circle()
+                                                .offset(x: 6)
+                                                .blendMode(.destinationOut)
+                                        }
+                                    }
+                                    .compositingGroup()
+                            }
                             .offset(x: -CGFloat(index) * 6)
                             .zIndex(-Double(index))
                     }
