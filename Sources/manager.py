@@ -114,7 +114,9 @@ def verdict_outcome(db, key, stream, trigger, verdict, summary, message, reply, 
     """The Outcome for a verdict, or None when the reply cannot be acted on."""
     if verdict == "ask":
         ask = reply.get("ask") if isinstance(reply.get("ask"), dict) else {}
-        text = str(ask.get("summary") or summary)
+        text = str(ask.get("summary") or "").strip() or summary.strip()
+        if not text:
+            return None
         options = ask.get("options")
         options = [str(o) for o in options if str(o).strip()] if isinstance(options, list) else []
         recommendation = str(ask.get("recommendation") or "")
