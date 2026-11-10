@@ -17,6 +17,7 @@ import termios
 import time
 import sys
 import uuid
+from urllib.parse import unquote, urlsplit
 
 # The bridge runs inside the signed app bundle.
 sys.dont_write_bytecode = True
@@ -114,6 +115,24 @@ def workstream_folder(folder):
     return metadata
 
 
+def initial_stream_title(folder, reference):
+    """Name the stream from its reference or original folder, before checkout allocation."""
+    reference = reference.strip()
+    if reference:
+        if match := links.PR.match(reference):
+            return f'{match[2]}#{match[3]}'
+        if match := links.LINEAR.match(reference):
+            return match['id'].upper()
+        try:
+            url = urlsplit(reference)
+            if url.scheme in ('http', 'https') and url.hostname:
+                return unquote(url.path.rstrip('/').rsplit('/', 1)[-1]) or url.hostname
+        except ValueError:
+            pass
+        return reference
+    return folder.name or str(folder)
+
+
 def create_stream(title, folder, reference, provider="claude"):
     if provider not in ("claude", "codex"):
         raise ValueError("Unknown agent.")
@@ -123,7 +142,7 @@ def create_stream(title, folder, reference, provider="claude"):
     metadata = workstream_folder(folder)
     metadata["provider"] = provider
     try:
-        return bd("create", "--title", title.strip() or "Untitled workstream", "-t", "task",
+        return bd("create", "--title", title.strip() or initial_stream_title(folder, reference), "-t", "task",
                   "--metadata", json.dumps(metadata), "--silent",
                   *(["--external-ref", reference.strip()] if reference.strip() else []))
     except Exception as error:

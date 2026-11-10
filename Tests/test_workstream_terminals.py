@@ -581,7 +581,7 @@ class WorktreeCreationTests(unittest.TestCase):
         if args[0] == 'create':
             metadata = json.loads(args[args.index('--metadata') + 1])
             key = 'mx-created-' + str(len(self.created))
-            self.created.append(dict(id=key, title='Test', status='open', metadata=metadata))
+            self.created.append(dict(id=key, title=args[args.index('--title') + 1], status='open', metadata=metadata))
             return key
         if args[0] == 'show':
             return json.dumps([next(i for i in self.created if i['id'] == args[1])])
@@ -595,6 +595,7 @@ class WorktreeCreationTests(unittest.TestCase):
         folders = [Path(i['metadata']['folder']) for i in self.created]
         self.assertNotEqual(*folders)
         for folder, issue in zip(folders, self.created):
+            self.assertEqual(issue['title'], 'source repo')
             self.assertEqual((folder / 'app' / 'file.txt').read_text(), 'committed\n')
             self.assertFalse((folder / 'untracked.txt').exists())
             self.assertEqual(self.git('rev-parse', 'HEAD', cwd=folder), self.git('rev-parse', 'HEAD'))
@@ -634,6 +635,24 @@ class WorktreeCreationTests(unittest.TestCase):
         streams.create_stream('Test', str(folder), '', 'claude')
         self.assertEqual(self.created[0]['metadata']['folder'], str(folder))
         self.assertNotIn('worktreeRoot', self.created[0]['metadata'])
+
+    def test_initial_names_use_reference_and_preserve_explicit_titles(self):
+        folder = self.root / 'plain folder'
+        folder.mkdir()
+        cases = [
+            ('', '  ', 'plain folder'),
+            ('', ' TEAM-123 ', 'TEAM-123'),
+            ('', 'https://linear.app/team/issue/eng-42/fix-startup', 'ENG-42'),
+            ('', 'https://github.com/owner/project/pull/123', 'project#123'),
+            ('', 'https://github.com/owner/project/pull/123/files?view=split#diff', 'project#123'),
+            ('', 'https://example.com/docs/Getting%20started/?view=full#intro', 'Getting started'),
+            ('', 'https://example.com/', 'example.com'),
+            ('  Custom name  ', 'https://example.com/', 'Custom name'),
+        ]
+        for title, reference, expected in cases:
+            with self.subTest(reference=reference, title=title):
+                streams.create_stream(title, str(folder), reference)
+                self.assertEqual(self.created[-1]['title'], expected)
 
     def test_unborn_repository_and_uncommitted_subfolder_fail_before_creating_issue(self):
         unborn = self.root / 'unborn'
