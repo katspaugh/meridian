@@ -703,5 +703,9 @@ struct NewStream: View {
         .onChange(of: notifications.destination) { _, id in
             if id != nil { openWindow(id: "dashboard") }
         }
+        WindowGroup("Document", id: "document", for: URL.self) { $url in
+            if let url { DocumentWindow(url: url) }
+        }.defaultSize(width: 760, height: 820)
+        .commandsRemoved()
     }
 }

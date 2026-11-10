@@ -8,6 +8,7 @@ struct WorkstreamInspector: View {
     let clearPipeline: () -> Void
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
+    @Environment(\.openWindow) private var openWindow
     @State private var confirmingCompletion = false
     private var unfinishedTasks: [BeadsTask] { stream.tasks.filter { $0.status != "closed" } }
 
@@ -25,7 +26,8 @@ struct WorkstreamInspector: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if stream.pipeline != nil || !stream.documents.isEmpty {
-                        PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline)
+                        PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline,
+                                        open: { openWindow(id: "document", value: URL(fileURLWithPath: $0.path)) })
                         Divider()
                     }
                     VStack(alignment: .leading, spacing: 16) {
