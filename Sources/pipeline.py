@@ -492,7 +492,7 @@ def _phase_detail(run, phase):
         return slug_name(run["specPath"]) if run.get("specPath") else ""
     if phase == "plan":
         if tasks:
-            return "{} tasks".format(len(tasks))
+            return "1 task" if len(tasks) == 1 else "{} tasks".format(len(tasks))
         return slug_name(run["planPath"]) if run.get("planPath") else ""
     if phase == "execute" and tasks:
         done = sum(1 for task in tasks if task["review"]["status"] == "done")
@@ -504,11 +504,15 @@ def _phase_detail(run, phase):
     return ""
 
 
+# A frozen run keeps only the recorded times of finished rows: rows that were in
+# progress lose their time along with their mark, and estimates are dropped.
 def _freeze(item, marks):
+    was_live = False
     for key in marks:
         if item[key] in ("running", "slow"):
             item[key] = "todo"
-    if item["estimate"]:
+            was_live = True
+    if was_live or item["estimate"]:
         item["time"] = None
         item["estimate"] = False
 

@@ -1,3 +1,5 @@
+import copy
+import json
 import sys
 from pathlib import Path
 import unittest
@@ -231,6 +233,8 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual((busy['needsYou'], busy['phases'][1]['mark'], busy['activeAgents']), (False, 'running', 1))
         skipped = pipeline.render(pipeline.advance_to(pipeline.new_run(T0), 'execute', T0), T0 + MIN)
         self.assertEqual(skipped['phases'][0]['id'], 'execute')
+        one = pipeline.with_plan(planned(), PLAN_PATH, [{'n': 1, 'title': 'Only'}])
+        self.assertEqual(pipeline.render(one, T0 + 6 * MIN)['phases'][1]['detail'], '1 task')
 
     def test_render_pull_request_finish_and_frozen(self):
         run = self.one_task_done_in_twenty_minutes()
@@ -247,6 +251,34 @@ class ScheduleTests(unittest.TestCase):
         pipeline.complete_phase(run, 'merge', T0 + 50 * MIN)
         done = pipeline.render(run, T0 + 55 * MIN, waiting=True)
         self.assertEqual((done['finished'], done['finishAt'], done['polling'], done['needsYou']), ('merged', T0 + 50 * MIN, False, False))
+        brainstorming = pipeline.advance_to(pipeline.new_run(T0), 'brainstorm', T0)
+        idea = pipeline.render(brainstorming, T0 + MIN, frozen=True)['phases'][0]
+        self.assertEqual((idea['mark'], idea['time'], idea['estimate']), ('todo', None, False))
+
+    def test_render_keeps_its_contract_and_leaves_the_run_alone(self):
+        view_keys = {'name', 'startedAt', 'finishAt', 'finished', 'needsYou', 'polling', 'frozen', 'activeAgents', 'phases'}
+        phase_keys = {'id', 'label', 'mark', 'time', 'estimate', 'detail', 'url', 'tasks'}
+        task_keys = {'n', 'title', 'mark', 'implement', 'review', 'round', 'time', 'estimate'}
+        in_progress = self.one_task_done_in_twenty_minutes()
+        pipeline.pull_request_created(in_progress, 'https://github.com/o/r/pull/12', T0 + 40 * MIN)
+        merged = pipeline.complete_phase(self.one_task_done_in_twenty_minutes(), 'merge', T0 + 50 * MIN)
+        for run in (planned(), in_progress, merged):
+            for frozen in (False, True):
+                before = copy.deepcopy(run)
+                pipeline.schedule(run, T0 + 55 * MIN)
+                view = pipeline.render(run, T0 + 55 * MIN, waiting=True, frozen=frozen)
+                self.assertEqual(run, before)
+                self.assertEqual(set(view), view_keys)
+                json.dumps(view, allow_nan=False)
+                for phase in view['phases']:
+                    self.assertEqual(set(phase), phase_keys)
+                    self.assertIsInstance(phase['estimate'], bool)
+                    self.assertIsInstance(phase['mark'], str)
+                    self.assertIsInstance(phase['detail'], str)
+                    for task in phase['tasks'] or []:
+                        self.assertEqual(set(task), task_keys)
+                        self.assertIsInstance(task['estimate'], bool)
+                        self.assertIsInstance(task['mark'], str)
 
 
 if __name__ == '__main__':
