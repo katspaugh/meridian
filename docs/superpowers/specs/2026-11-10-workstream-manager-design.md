@@ -1,6 +1,6 @@
 # Workstream manager: design
 
-Date: 2026-11-10. Status: awaiting approval.
+Date: 2026-11-10. Status: approved and built. Updated after the build to match what shipped (tools, typing, permission scope).
 
 ## Why
 
@@ -66,7 +66,7 @@ Each consult receives:
 
 Everything written by an agent (requests, blocker text, transcripts) is passed as data, marked as untrusted, and never as instructions.
 
-The manager may investigate before deciding, with read-only tools: reading and searching files, and the web. For Stop reviews, sweeps and chat it also gets a short allowlist of read-only commands (`git` log/diff/status/show, `gh` view/list, `bd` show/list/ready). It has no write tools.
+The manager may investigate before deciding, with read-only tools: reading and searching files. For Stop reviews, sweeps and chat it also gets the web and a short allowlist of read-only commands (`gh` view/list/checks, `bd` show/list/ready/children). It has no write tools and cannot run `git`: git can write files (`--output`) and runs programs named in a repository's own config, and agents own those repositories.
 
 Verified by test call: `claude -p --safe-mode --model fable --effort high --output-format json --json-schema …` works on the subscription login and returned a structured decision in 18 seconds.
 
@@ -76,7 +76,7 @@ These run inside the hook that Claude Code already calls, so they work even when
 
 | What happens | Hook | What the manager can return |
 |---|---|---|
-| Claude shows a permission prompt (in auto mode, after repeated blocks) | `PermissionRequest` | allow; deny, with a message suggesting another route; hand to the user |
+| Claude shows a permission prompt in an auto-mode session (after repeated blocks) | `PermissionRequest` | allow; deny, with a message suggesting another route; hand to the user |
 | Auto mode's classifier blocks an action | `PermissionDenied` | approve a retry; uphold the block; hand to the user |
 | Claude asks a question | `PreToolUse` on `AskUserQuestion` | answer it; hand to the user |
 | Claude presents a plan | `PreToolUse` on `ExitPlanMode` | approve; send back with feedback; hand to the user |
@@ -96,18 +96,18 @@ If the `PreToolUse` allow does not take effect, there is a second route that use
 
 Whether to step in is the manager's judgment, not an app rule (builder's call, following the user's wish for a less prescriptive manager). Each consult is told who prompted the agent last and how long ago, and the role prompt says: if the boss is in a conversation with this agent, an answered question is a finished turn, and a question the agent asks is theirs to answer.
 
-One app rule does apply. A sweep never types into the terminal the user currently has selected while Muxteroid is frontmost, so a manager message cannot land in a prompt the user is halfway through writing. Messages the user asks for in chat are typed regardless.
+One app rule does apply. A sweep never types into the terminal the user currently has selected while Muxteroid is frontmost, so a manager message cannot land in a prompt the user is halfway through writing. The app reports the selected terminal to the bridge, and the sweep checks it again immediately before typing. Messages the user asks for in chat are typed regardless.
 
 ### Triggers that need the app open
 
 - **Sweep.** Some situations fire no hook: a Codex terminal that stopped or asked something, an idle agent whose blocker has since cleared, a stopped terminal with ready work. The app notices when this set changes and runs one consult over all workstreams. The manager returns a list of actions (tell a terminal something, restart a terminal) and a fresh briefing.
 - **Chat.** The user writes to the manager. It answers and may act: tell an agent something, record a preference. Chat keeps one continuing conversation.
 
-The manager tells an idle agent something by typing into its terminal. Verified for Claude: a multi-line pasted message followed by Enter arrives as a normal prompt. The app only types when the terminal is idle or working, never when a dialog is open.
+The manager tells an idle agent something by typing into its terminal. Verified for Claude and for Codex: a multi-line pasted message followed by Enter arrives as a normal prompt. The app types only when the terminal is idle (ready or waiting for review), never while the agent is working, because a dialog can be on screen then.
 
 ### Codex
 
-Codex sessions have no hooks. In the first version the manager sees Codex workstreams, includes them in the briefing, and may nudge an idle Codex terminal by typing. Typing into the Codex terminal is not yet verified; if it proves unreliable, nudging Codex is dropped from this version. Codex approval prompts stay with the user.
+Codex sessions have no hooks. The manager sees Codex workstreams, includes them in the briefing, and may nudge an idle Codex terminal by typing (verified). Codex approval prompts stay with the user.
 
 ### What the user sees
 
