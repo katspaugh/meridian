@@ -124,7 +124,7 @@ enum Bridge {
             p.waitUntilExit()
             if traced { WorkstreamLog.record("\(context) bridge exited pid=\(p.processIdentifier) status=\(p.terminationStatus)") }
             if p.terminationStatus != 0 {
-                throw NSError(domain: "Muxteroid", code: Int(p.terminationStatus), userInfo: [
+                throw NSError(domain: "Meridian", code: Int(p.terminationStatus), userInfo: [
                     NSLocalizedDescriptionKey: (try? String(contentsOf: errors, encoding: .utf8)) ?? "Command failed."
                 ])
             }
@@ -273,7 +273,7 @@ struct Dashboard: View {
     @ObservedObject var store: Store
     @ObservedObject var notifications: AttentionNotifications
     @ObservedObject var manager: ManagerStore
-    private enum Pane { case workstream, board, manager }
+    private enum Pane { case workstream, board }
     @State private var expanded: Set<Inbox> = [.active]
     @State private var adding = false
     @State private var pane = Pane.workstream
@@ -476,14 +476,6 @@ struct Dashboard: View {
 
     private var sidebar: some View {
         List {
-            Button { pane = .manager } label: {
-                Label("Manager", systemImage: "person.crop.circle.badge.checkmark")
-                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).disabled(switching)
-            .badge(manager.state?.asks.count ?? 0)
-            .listRowBackground(pane == .manager ? Color.accentColor.opacity(0.16) : Color.clear)
-            .keyboardShortcut("m", modifiers: [.command, .shift])
             Button { pane = .board } label: {
                 Label("Sprint board", systemImage: "rectangle.split.3x1")
                     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
@@ -515,10 +507,7 @@ struct Dashboard: View {
             } detail: {
                 VStack(spacing: 0) {
                     if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
-                    if pane == .manager {
-                        ManagerView(store: manager, streams: store.rows, openStream: openFromOverview,
-                                    focusedTerminal: selectedTerminalID)
-                    } else if pane == .board {
+                    if pane == .board {
                         SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true })
                     } else if let stream = selected {
                         let terminal = selectedTerminal(stream)
@@ -585,7 +574,7 @@ struct Dashboard: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .navigationTitle(pane == .manager ? "Manager" : pane == .board ? "Sprint board" : (selected?.title ?? "Workstreams"))
+                .navigationTitle(pane == .board ? "Sprint board" : (selected?.title ?? "Workstreams"))
                 .toolbar {
                     Button { adding = true } label: { Label("New workstream", systemImage: "plus") }.keyboardShortcut("n")
                     Button { inspectorVisible.toggle() } label: {
@@ -642,7 +631,7 @@ struct Dashboard: View {
         return { closeTerminal(terminal, in: stream) }
     }
 
-    /// Opening a workstream from the board or the Manager also reveals it in the sidebar.
+    /// Opening a workstream from the board also reveals it in the sidebar.
     private func openFromOverview(_ stream: Stream) {
         selectTerminal(stream, agent: nil)
         expanded.insert(stream.state == "Done" ? .done : .active)
@@ -691,7 +680,7 @@ struct TerminalCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .appTermination) {
-            Button("Quit Muxteroid") { NSApp.terminate(nil) }
+            Button("Quit Meridian") { NSApp.terminate(nil) }
                 .keyboardShortcut("q", modifiers: .command)
         }
         CommandGroup(after: .newItem) {
@@ -782,11 +771,11 @@ struct NewStream: View {
     }
 }
 
-@main struct MuxteroidApp: App {
+@main struct MeridianApp: App {
     @NSApplicationDelegateAdaptor(AttentionNotifications.self) private var notifications
     @Environment(\.openWindow) private var openWindow
     var body: some Scene {
-        Window("Muxteroid", id: "dashboard") {
+        Window("Meridian", id: "dashboard") {
             Dashboard(store: notifications.store, notifications: notifications, manager: notifications.manager)
         }.defaultSize(width: 1080, height: 760)
         .commands { TerminalCommands() }

@@ -607,7 +607,7 @@ class WorktreeCreationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Tracker unavailable'):
                 streams.create_stream('Test', str(self.repo), '', 'codex')
         self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
-        self.assertEqual(self.git('branch', '--list', 'muxteroid/*'), '')
+        self.assertEqual(self.git('branch', '--list', 'meridian/*'), '')
         self.assertEqual(list((self.home / 'worktrees').iterdir()), [])
 
 

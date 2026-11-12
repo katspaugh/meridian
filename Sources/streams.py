@@ -28,7 +28,8 @@ import codex_session
 import manager
 import manager_store
 
-ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
+# Keep the existing data location and socket namespace so running sessions survive the rename.
+ROOT = Path(os.getenv("MERIDIAN_HOME") or os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
 os.environ["PATH"] += os.pathsep + os.pathsep.join(map(str, [Path.home()/".local/bin", "/opt/homebrew/bin", "/usr/local/bin"]))
 SOCKET = "muxteroid-" + hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]
@@ -103,7 +104,7 @@ def workstream_folder(folder):
         if kind != "tree":
             raise ValueError("The selected subfolder is not committed. Commit it first or choose the repository root.")
     name = uuid.uuid4().hex[:12]
-    branch = "muxteroid/" + name
+    branch = "meridian/" + name
     checkout = ROOT / "worktrees" / name
     checkout.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "-C", str(repository), "worktree", "add", "-b", branch, str(checkout), commit])
@@ -265,7 +266,7 @@ def agent_context(key, event):
     # workstream environment below, and a working directory can have its own database.
     cli = "BEADS_DIR=" + shlex.quote(str(ROOT/".beads")) + " " + shlex.quote(shutil.which("bd") or "bd")
     link_command = shlex.join([sys.executable, str(Path(__file__).resolve()), "link", key])
-    guide = f"""Use Beads proactively as your durable task manager for Muxteroid workstream {key}.
+    guide = f"""Use Beads proactively as your durable task manager for Meridian workstream {key}.
 Run your Beads commands with this prefix: {cli}
 Inspect the parent with bd show {key}, then bd children {key} --json before planning or resuming.
 Maintain the parent title as a short semantic summary of the current goal. As soon as the goal is clear, use bd update {key} --title "Concise task name". Use the conversation, relevant findings, and linked issue details to describe the concrete outcome in roughly 3–8 words (for example, "Recover interrupted photo uploads"). Avoid generic placeholders, paths, ticket IDs, and copied prompt fragments.
@@ -336,7 +337,7 @@ def hook(key, sid):
             # A permission prompt's notification follows it within seconds, while the manager may still settle it.
             reviewing = name == "Notification" and str((db.execute(
                 "SELECT detail FROM activity WHERE id=? AND session=?", (key, sid)).fetchone() or [""])[0] or ""
-            ).startswith("The manager is ")
+            ).startswith(("Meridian is ", "The manager is "))
             if not reviewing:
                 db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
                            (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"),

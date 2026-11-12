@@ -17,17 +17,17 @@ Outcome = collections.namedtuple("Outcome", "output state detail")
 NOTHING = Outcome(None, None, None)
 REVIEWED_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan"}
 TRIGGERS = {"PermissionRequest": "permission", "PermissionDenied": "denied", "Stop": "stop"}
-APPROVED = "Approved by the workstream manager."
+APPROVED = "Approved by Meridian."
 CONTINUING = "Claude is continuing after auto mode blocked an action."
 TAIL_BYTES = 512 * 1024
 RETRY = {"hookSpecificOutput": {"hookEventName": "PermissionDenied", "retry": True}}
-STUCK = ("The manager sent this agent back to work three times in a row and it stopped again. "
+STUCK = ("Meridian sent this agent back to work three times in a row and it stopped again. "
          "Have a look at where it is stuck.")
-REVIEWING = {"permission": "The manager is reviewing a permission request for {tool}.",
-             "denied": "The manager is reviewing a permission request for {tool}.",
-             "question": "The manager is reading Claude’s question.",
-             "plan": "The manager is reviewing Claude’s plan.",
-             "stop": "The manager is reviewing where this work stands."}
+REVIEWING = {"permission": "Meridian is reviewing a permission request for {tool}.",
+             "denied": "Meridian is reviewing a permission request for {tool}.",
+             "question": "Meridian is reading Claude’s question.",
+             "plan": "Meridian is reviewing Claude’s plan.",
+             "stop": "Meridian is reviewing where this work stands."}
 SITUATIONS = {
     "permission": "Claude Code is showing a permission prompt for {tool}. Return `allow` to let it run once, "
                   "`deny` with a `message` telling the agent what to do instead, or `ask` to hand it to the boss.",
@@ -56,8 +56,8 @@ CHAT = ("# Trigger: chat\nThe boss is writing to you. Answer in `reply`, conclus
         " Add any preference or standing instruction the boss states to `remember`.")
 SWEEP_PAUSED = "You are paused: return no actions."
 CHAT_ACTION = "The boss asked for this in chat."
-UNREACHABLE = "The manager could not be reached. Check that Claude Code is signed in, then try again."
-NUDGE_CAP = ("The manager nudged this agent three times and it is waiting again. "
+UNREACHABLE = "Meridian could not be reached. Check that Claude Code is signed in, then try again."
+NUDGE_CAP = ("Meridian nudged this agent three times and it is waiting again. "
              "Have a look at where it is stuck.")
 # Only an idle agent: a dialog can be on screen while the state still says Working, and Enter would accept it.
 TELLABLE = ("Review", "Ready")
@@ -442,7 +442,7 @@ def _act(bridge, reply, known, trigger, summary, exclude=None, paused=False):
         if terminal not in known:
             reason = "unknown terminal"
         elif paused:
-            reason = "manager is paused"
+            reason = "Meridian is paused"
         elif action == "tell" and terminal in restarted:
             reason = "terminal is still starting"
         else:

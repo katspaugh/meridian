@@ -23,8 +23,8 @@ with tempfile.TemporaryDirectory() as home:
     with patch.dict(os.environ, MUXTEROID_HOME=home):
         import streams
 
-ERROR = "The manager could not be reached. Check that Claude Code is signed in, then try again."
-NUDGE_CAP = ("The manager nudged this agent three times and it is waiting again. "
+ERROR = "Meridian could not be reached. Check that Claude Code is signed in, then try again."
+NUDGE_CAP = ("Meridian nudged this agent three times and it is waiting again. "
              "Have a look at where it is stuck.")
 
 
@@ -468,7 +468,7 @@ class SweepTests(Fixture):
         self.run.assert_not_called()
         self.assertEqual((self.bridge.launched, self.events()), ([], []))
         self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: "
-                         "tell codex (manager is paused); restart claude (manager is paused)")
+                         "tell codex (Meridian is paused); restart claude (Meridian is paused)")
         self.assertEqual([a["summary"] for a in manager.state(self.bridge)["asks"]], ["Ship it?"])
         self.assertIn("\nYou are paused: return no actions.\n", self.consult.call_args.args[2])
 

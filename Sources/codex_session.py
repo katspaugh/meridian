@@ -31,7 +31,7 @@ class Client:
                 raise ValueError("Codex refused the local connection.")
             while self.reader.readline() not in (b"\r\n", b""):
                 pass
-            self.call("initialize", {"clientInfo": {"name": "muxteroid", "version": "1"}})
+            self.call("initialize", {"clientInfo": {"name": "meridian", "version": "1"}})
             self.send(1, b'{"method":"initialized"}')
         except BaseException:
             self.close()

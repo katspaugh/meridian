@@ -122,7 +122,7 @@ struct WorkstreamInspector: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "person.crop.circle.badge.checkmark").foregroundStyle(.orange)
-                Text("The manager needs your call").fontWeight(.semibold)
+                Text("Meridian needs your call").fontWeight(.semibold)
             }
             ForEach(asks) { ask in
                 if ask.id != asks.first?.id { Divider() }
@@ -183,5 +183,26 @@ struct TaskBlockerDetails: View {
             }
             .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+struct ManagerAskDetails: View {
+    let ask: ManagerAsk
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(ask.summary).fontWeight(.semibold)
+            ForEach(Array(ask.options.enumerated()), id: \.offset) { _, option in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("•").foregroundStyle(.secondary)
+                    Text(option)
+                }
+            }
+            if !ask.recommendation.isEmpty {
+                Text("Recommended: \(ask.recommendation)").foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .textSelection(.enabled)
     }
 }

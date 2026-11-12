@@ -143,7 +143,7 @@ class ManagerReviewTests(Fixture):
         retry = self.event("PreToolUse", tool_name="Bash", tool_input={"command": "make dist"})
         self.assertEqual(manager.review(self.bridge, "t1", "s", retry), manager.Outcome(
             {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                    "permissionDecisionReason": "Approved by the workstream manager."}}, None, None))
+                                    "permissionDecisionReason": "Approved by Meridian."}}, None, None))
         self.assertEqual(self.events()[0][:3], ("denied", "approve", "Needed for the build."))
 
     def test_approved_permission_request_is_allowed_without_a_consult(self):
@@ -151,7 +151,7 @@ class ManagerReviewTests(Fixture):
             store.approve(db, "t1", "Bash", {"command": "make dist"})
         request = self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "make dist"})
         outcome = manager.review(self.bridge, "t1", "s", request)
-        self.assertEqual(outcome, manager.Outcome(ALLOW_PERMISSION, "Working", "Approved by the workstream manager."))
+        self.assertEqual(outcome, manager.Outcome(ALLOW_PERMISSION, "Working", "Approved by Meridian."))
         self.consult.assert_not_called()
         self.assertEqual(self.events(), [("denied", "prompt-allowed",
                                           "Answered the permission prompt for the approved Bash action.", '{"message": ""}')])
@@ -191,7 +191,7 @@ class ManagerReviewTests(Fixture):
         with self.db() as db:
             for _ in range(3):
                 store.add_nudge(db, "t1")
-        text = ("The manager sent this agent back to work three times in a row and it stopped again. "
+        text = ("Meridian sent this agent back to work three times in a row and it stopped again. "
                 "Have a look at where it is stuck.")
         self.assertEqual(manager.review(self.bridge, "t1", "s", self.event("Stop")), manager.Outcome(None, "Needs you", text))
         self.assertEqual(self.asks(), [("t1", "t1", text, "[]", "")])
@@ -368,8 +368,8 @@ class ManagerReviewTests(Fixture):
         manager.review(self.bridge, "t1", "s",
                        self.event("PermissionRequest", tool_name="Bash", tool_input={}, permission_mode="auto"))
         manager.review(self.bridge, "t1", "s", self.event("Stop"))
-        self.assertEqual(seen[:3], [("Working", "The manager is reviewing a permission request for Bash."), True, False])
-        self.assertEqual(seen[3], ("Working", "The manager is reviewing where this work stands."))
+        self.assertEqual(seen[:3], [("Working", "Meridian is reviewing a permission request for Bash."), True, False])
+        self.assertEqual(seen[3], ("Working", "Meridian is reviewing where this work stands."))
         self.assertEqual(self.bridge.locked_during_streams, [True, True])
 
     def test_reviewing_detail_for_questions_and_plans(self):
@@ -377,7 +377,7 @@ class ManagerReviewTests(Fixture):
         self.consult.side_effect = lambda *a, **k: seen.append(self.activity()[1])
         manager.review(self.bridge, "t1", "s", self.event("PreToolUse", tool_name="AskUserQuestion", tool_input={}))
         manager.review(self.bridge, "t1", "s", self.event("PreToolUse", tool_name="ExitPlanMode", tool_input={}))
-        self.assertEqual(seen, ["The manager is reading Claude’s question.", "The manager is reviewing Claude’s plan."])
+        self.assertEqual(seen, ["Meridian is reading Claude’s question.", "Meridian is reviewing Claude’s plan."])
 
     def test_subagent_event_writes_no_activity_and_returns_no_state(self):
         self.consult.return_value = {"verdict": "allow", "summary": "Fine.", "message": ""}
