@@ -68,6 +68,7 @@ class PullDetailsTests(unittest.TestCase):
     def test_bridge_prints_details_keyed_by_url(self):
         output = io.StringIO()
         with patch.object(links, "command_output", return_value=reply(state="MERGED")), \
+                patch.object(streams.manager, "pull_messages"), \
                 contextlib.redirect_stdout(output):
             streams.main("pulls", URL)
         self.assertEqual(json.loads(output.getvalue())[URL]["state"], "MERGED")

@@ -505,6 +505,52 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         streams.terminal_exited(key)
         self.assertNotIn(key, [t['id'] for t in streams.streams()[0]['terminals']])
 
+    def test_now_line_tracks_tools_and_clears_at_turn_end(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.live.add(key)
+        self.run_hook(key, "sid", hook_event_name="PreToolUse", tool_name="Bash",
+                      tool_input={"description": "Running tests", "command": "make test"})
+        terminal = next(t for t in streams.streams()[0]['terminals'] if t['id'] == key)
+        self.assertEqual(terminal['nowText'], 'Running tests')
+        self.assertIsInstance(terminal['nowStarted'], float)
+        self.run_hook(key, "sid", hook_event_name="Stop", last_assistant_message="Done")
+        terminal = next(t for t in streams.streams()[0]['terminals'] if t['id'] == key)
+        self.assertEqual(terminal['nowText'], '')
+        self.assertIsNone(terminal['nowStarted'])
+
+    def test_saved_rules_reach_session_and_prompt_context(self):
+        key = self.register(provider="claude", sid="sid")
+        streams.streams()
+        project = streams.manager_store.project_key(self.parent['metadata'])
+        streams.manager_store.save_rule(self.root, project, 'Run tests before finishing.')
+        for event in ('SessionStart', 'UserPromptSubmit'):
+            self.assertIn('Run tests before finishing.', streams.agent_context(key, event))
+
+    def test_return_after_thirty_minutes_requests_one_sweep(self):
+        import time
+        with streams.database() as db:
+            streams.manager_store.set_setting(db, 'sweep_time', '1234')
+            streams.manager_store.set_setting(db, 'inactive_since', str(time.time() - 1801))
+        streams.main('manager-active', '1')
+        with streams.database() as db:
+            self.assertEqual(streams.manager_store.setting(db, 'sweep_time'), '0')
+            self.assertEqual(streams.manager_store.setting(db, 'inactive_since'), '')
+            streams.manager_store.set_setting(db, 'sweep_time', '5678')
+        streams.main('manager-active', '1')
+        with streams.database() as db:
+            self.assertEqual(streams.manager_store.setting(db, 'sweep_time'), '5678')
+
+    def test_post_tool_reminder_reaches_hook_output_while_paused(self):
+        import time
+        key = self.register(provider="claude", state="Working", sid="sid")
+        self.live.add(key)
+        with streams.database() as db:
+            streams.manager_store.note_user_prompt(db, key, 'Work', now=time.time() - 301)
+        with patch.object(streams.manager, 'review', side_effect=REVIEW):
+            out = json.loads(self.run_hook(key, 'sid', hook_event_name='PostToolUse', tool_name='Read', tool_input={}))
+        self.assertIn('planned steps', out['hookSpecificOutput']['additionalContext'])
+        self.assertEqual(out['hookSpecificOutput']['hookEventName'], 'PostToolUse')
+
 
 class WorktreeCreationTests(unittest.TestCase):
     def setUp(self):
@@ -535,7 +581,7 @@ class WorktreeCreationTests(unittest.TestCase):
         if args[0] == 'create':
             metadata = json.loads(args[args.index('--metadata') + 1])
             key = 'mx-created-' + str(len(self.created))
-            self.created.append(dict(id=key, title='Test', status='open', metadata=metadata))
+            self.created.append(dict(id=key, title=args[args.index('--title') + 1], status='open', metadata=metadata))
             return key
         if args[0] == 'show':
             return json.dumps([next(i for i in self.created if i['id'] == args[1])])
@@ -549,6 +595,7 @@ class WorktreeCreationTests(unittest.TestCase):
         folders = [Path(i['metadata']['folder']) for i in self.created]
         self.assertNotEqual(*folders)
         for folder, issue in zip(folders, self.created):
+            self.assertEqual(issue['title'], 'source repo')
             self.assertEqual((folder / 'app' / 'file.txt').read_text(), 'committed\n')
             self.assertFalse((folder / 'untracked.txt').exists())
             self.assertEqual(self.git('rev-parse', 'HEAD', cwd=folder), self.git('rev-parse', 'HEAD'))
@@ -588,6 +635,24 @@ class WorktreeCreationTests(unittest.TestCase):
         streams.create_stream('Test', str(folder), '', 'claude')
         self.assertEqual(self.created[0]['metadata']['folder'], str(folder))
         self.assertNotIn('worktreeRoot', self.created[0]['metadata'])
+
+    def test_initial_names_use_reference_and_preserve_explicit_titles(self):
+        folder = self.root / 'plain folder'
+        folder.mkdir()
+        cases = [
+            ('', '  ', 'plain folder'),
+            ('', ' TEAM-123 ', 'TEAM-123'),
+            ('', 'https://linear.app/team/issue/eng-42/fix-startup', 'ENG-42'),
+            ('', 'https://github.com/owner/project/pull/123', 'project#123'),
+            ('', 'https://github.com/owner/project/pull/123/files?view=split#diff', 'project#123'),
+            ('', 'https://example.com/docs/Getting%20started/?view=full#intro', 'Getting started'),
+            ('', 'https://example.com/', 'example.com'),
+            ('  Custom name  ', 'https://example.com/', 'Custom name'),
+        ]
+        for title, reference, expected in cases:
+            with self.subTest(reference=reference, title=title):
+                streams.create_stream(title, str(folder), reference)
+                self.assertEqual(self.created[-1]['title'], expected)
 
     def test_unborn_repository_and_uncommitted_subfolder_fail_before_creating_issue(self):
         unborn = self.root / 'unborn'

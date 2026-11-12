@@ -15,6 +15,15 @@ def begin(action, stream):
 def record(stage):
     if _context is None:
         return
+    _write(stage)
+
+
+def error(message):
+    """Written even when no operation was begun, such as from a Claude hook."""
+    _write(message)
+
+
+def _write(message):
     try:
         now = datetime.now(timezone.utc)
         folder = Path.home() / "Library/Logs/Muxteroid"
@@ -23,8 +32,9 @@ def record(stage):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             timestamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            os.write(fd, f"{timestamp} bridge[{os.getpid()}] {_context} {stage}\n".encode())
+            os.write(fd, f"{timestamp} bridge[{os.getpid()}] {_context or '-'} {message}\n".encode())
         finally:
             os.close(fd)
-    except OSError:
+    # Diagnostics never fail their caller, which may be handling an error already.
+    except Exception:
         pass

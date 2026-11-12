@@ -9,8 +9,11 @@ cp "$bin/Meridian" "$contents/MacOS/"
 for bundle in "$bin"/*.bundle; do
     cp -R "$bundle" "$contents/Resources/"
 done
-cp Sources/workstream_log.py Sources/streams.py Sources/workstream_links.py Sources/subagents.py Sources/agent_navigation.py Sources/codex_session.py Sources/usage_limits.py \
+# streams.py last: a hook that fires during a rebuild must find every module it imports.
+cp Sources/workstream_log.py Sources/workstream_links.py Sources/subagents.py Sources/agent_navigation.py Sources/codex_session.py Sources/usage_limits.py \
+    Sources/pipeline.py Sources/pipeline_tracker.py \
     Sources/manager.py Sources/manager_store.py Sources/manager_brain.py Sources/manager_role.md "$contents/Resources/"
+cp Sources/streams.py "$contents/Resources/"
 plugin="$contents/Resources/agent-view"
 mkdir -p "$plugin/.claude-plugin" "$plugin/hooks"
 cp Assets/agent-view/.claude-plugin/plugin.json "$plugin/.claude-plugin/"

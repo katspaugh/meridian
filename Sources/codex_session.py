@@ -10,6 +10,7 @@ import struct
 import subprocess
 import time
 
+import pipeline_tracker as tracker
 import workstream_log as trace
 import workstream_links as links
 
@@ -116,6 +117,8 @@ def observe(client, db, key, previous, cache):
         cursor = page.get("nextCursor")
         if not cursor:
             break
+    # Threads this process has observed: a turn already complete at a thread's first sighting is a replay.
+    seen = cache.setdefault("pipeline:seen", set())
     for identity in ids:
         thread = client.call("thread/read", {"threadId": identity})["thread"]
         parent = thread.get("parentThreadId")
@@ -136,6 +139,7 @@ def observe(client, db, key, previous, cache):
                 if not parent:
                     db.execute("UPDATE activity SET state='Ready',detail='Codex is ready for a prompt.' WHERE id=?", (key,))
                     db.commit()
+                seen.add(identity)
                 continue
             summary = next(iter(page["data"]), {})
             stamp = (summary.get("id"), summary.get("status"))
@@ -159,7 +163,13 @@ def observe(client, db, key, previous, cache):
                     links.collect(db,key,item["text"])
                 elif item["type"] == "commandExecution" and item.get("exitCode") == 0:
                     links.tool_result(db,key,"Bash",{"command":item["command"]},item.get("aggregatedOutput") or "",thread["cwd"])
+                    if not parent and identity in seen:
+                        # Commit first: a failing tracker rolls back, and must not take Codex state with it.
+                        db.commit()
+                        tracker.guarded(db, None, tracker.command_event, db, key, item["command"],
+                                        item.get("aggregatedOutput") or "", time.time())
         db.commit()
+        seen.add(identity)
     for child, in db.execute("SELECT id FROM codex_children WHERE stream=? AND state IN ('Working','Needs you')", (key,)).fetchall():
         if child not in ids:
             db.execute("UPDATE codex_children SET state='Offline' WHERE stream=? AND id=?", (key,child))

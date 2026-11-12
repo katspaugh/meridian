@@ -13,6 +13,7 @@ let package = Package(
             .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             .product(name: "GhosttyTerminal", package: "libghostty-spm")
         ], path: "Sources", exclude: ["streams.py", "workstream_log.py", "workstream_links.py", "subagents.py", "agent_navigation.py", "codex_session.py", "usage_limits.py",
+                       "pipeline.py", "pipeline_tracker.py",
                        "manager.py", "manager_store.py", "manager_brain.py", "manager_role.md"], resources: [.process("AgentIcons.xcassets")])
     ],
     swiftLanguageModes: [.v5]
