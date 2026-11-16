@@ -281,15 +281,27 @@ def concise(text, limit=160):
     return text if len(text) <= limit else text[:limit - 1].rsplit(' ', 1)[0] + '…'
 
 
-def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None):
+def coalesce_pending(db):
+    # Edits replace old versions; never send an obsolete bot review before its newest revision.
+    seen = set()
+    for key, done in db.execute('SELECT id,done FROM manager_comments ORDER BY rowid DESC').fetchall():
+        parts = key.split(':')
+        identity = ':'.join(parts[:3] if parts[0] == 'github' else parts[:2])
+        if identity in seen and not done:
+            db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
+        seen.add(identity)
+
+
+def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None, classify=True):
     with transaction(bridge) as db:
         if store.paused(db) or store.setting(db, 'watch_comments') == '0':
             return
         recover_ambiguous(db)
+        coalesce_pending(db)
         pending = db.execute('SELECT id,payload,plan FROM manager_comments WHERE done=0 ORDER BY rowid LIMIT 20').fetchall()
     unplanned = [json.loads(payload) for _, payload, plan in pending if not plan]
     plans = {}
-    if unplanned:
+    if unplanned and classify:
         context = ('# Trigger: comment\nDecide which external comments need follow-up work. '
                    'Return plans with each comment id, action=ignore for acknowledgements, resolved feedback or chatter, '
                    'or action=follow for actionable requests, questions or review feedback. '
@@ -304,7 +316,7 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
             if isinstance(plan, dict) and isinstance(plan.get('id'), str) and plan.get('action') in ('ignore', 'follow'):
                 if plan['action'] == 'ignore' or isinstance(plan.get('message'), str) and plan['message'].strip():
                     plans[plan['id']] = plan
-    touched = set()
+    restarted, deliveries = set(), {}
     for key, payload, saved_plan in pending:
         item = json.loads(payload)
         matches = matching(rows, item['target'])
@@ -352,22 +364,34 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
                                'Open this workstream and add a Claude or Codex terminal.')
                 db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
             continue
-        # Prefer an existing live agent over starting another one alongside active work.
-        terminal = next((t for t in terminals if t.get('live', t.get('state') != 'Offline')), terminals[0])
-        if terminal['id'] in touched:
+        # An idle agent in the same stream can accept feedback even when its sibling is working.
+        terminal = min(terminals, key=lambda t: (
+            not t.get('live', t.get('state') != 'Offline'),
+            t.get('state') not in ('Review', 'Ready'), t.get('id') in (exclude,), t['id']))
+        if terminal['id'] in restarted:
             continue
         action = 'restart' if not terminal.get('live', terminal.get('state') != 'Offline') else 'tell'
+        if action == 'tell':
+            deliveries.setdefault((row['id'], terminal['id']), []).append((key, message))
+            continue
         try:
-            reason = act_one(bridge, dict(terminal=terminal['id'], action=action, message=message if action == 'tell' else ''),
-                             row['id'], 'comments', 'Follow up on ' + item['url'], exclude)
+            reason = act_one(bridge, dict(terminal=terminal['id'], action='restart', message=''),
+                             row['id'], 'comments', 'Restart for new comment feedback.', exclude)
+            if reason is None:
+                restarted.add(terminal['id'])
+        except Exception:
+            pass
+    for (stream, terminal), batch in deliveries.items():
+        message = (batch[0][1] if len(batch) == 1 else 'Follow up on these comments together:\n\n'
+                   + '\n\n'.join(f'{index}. {body}' for index, (_, body) in enumerate(batch, 1)))
+        try:
+            reason = act_one(bridge, dict(terminal=terminal, action='tell', message=message), stream, 'comments',
+                             f'Follow up on {len(batch)} comment(s).', exclude)
         except Exception:
             continue
-        # Restart is only a staging step. Keep the comment queued until a prompt was delivered.
         if reason is None:
-            touched.add(terminal['id'])
-        if reason is None and action == 'tell':
             with transaction(bridge) as db:
-                db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
+                db.executemany('UPDATE manager_comments SET done=1 WHERE id=?', [(key,) for key, _ in batch])
 
 
 def watch(bridge, rows, transaction, brain, untrusted, act_one, exclude=None):
@@ -379,5 +403,7 @@ def watch(bridge, rows, transaction, brain, untrusted, act_one, exclude=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
+        # Deliver already classified feedback before slow network requests or model calls.
+        follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude, classify=False)
         poll(bridge, rows, transaction)
         follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude)

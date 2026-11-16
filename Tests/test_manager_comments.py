@@ -36,6 +36,56 @@ class CommentTests(Fixture):
     def linked(self):
         self.rows[0]['links'] = [dict(url='https://github.com/o/r/pull/12')]
 
+    def test_new_feedback_bypasses_old_nudge_cap_and_clears_only_cap_question(self):
+        self.seed(); self.linked(); self.plan()
+        with self.db() as db:
+            for _ in range(store.MAX_NUDGES): store.add_nudge(db, 't1')
+            store.open_ask(db, 'w1', 't1', manager.NUDGE_CAP, [], '')
+            store.open_ask(db, 'w1', '', 'Unrelated question', [], '')
+        self.follow()
+        self.assertEqual(self.done(), 1)
+        with self.db() as db: self.assertEqual(store.nudges(db, 't1'), 0)
+        self.assertEqual([a['summary'] for a in manager.state(self.bridge)['asks']], ['Unrelated question'])
+
+    def test_batches_pending_comments_in_one_prompt(self):
+        first = self.seed(plan=dict(action='follow', message='First fix.')); self.linked()
+        second = dict(first, id='comment:2', url=first['url'] + '-second')
+        with self.db() as db:
+            db.execute('INSERT INTO manager_comments(id,payload,plan) VALUES (?,?,?)',
+                       (second['id'], json.dumps(second), json.dumps(dict(action='follow', message='Second fix.'))))
+        self.follow()
+        self.assertEqual(len(self.typed()), 2)
+        self.assertIn(b'First fix.', self.typed()[0])
+        self.assertIn(b'Second fix.', self.typed()[0])
+        with self.db() as db: self.assertEqual(db.execute('SELECT count(*) FROM manager_comments WHERE done=0').fetchone()[0], 0)
+
+    def test_newest_revision_supersedes_old_pending_feedback(self):
+        item = self.seed(plan=dict(action='follow', message='Obsolete')); self.linked()
+        with self.db() as db:
+            db.execute("UPDATE manager_comments SET id='github:comment:12:old'")
+            item['id'] = 'github:comment:12:new'
+            db.execute('INSERT INTO manager_comments(id,payload,plan) VALUES (?,?,?)',
+                       (item['id'], json.dumps(item), json.dumps(dict(action='follow', message='Current fix.'))))
+        self.follow()
+        self.assertNotIn(b'Obsolete', self.typed()[0])
+        self.assertIn(b'Current fix.', self.typed()[0])
+        with self.db() as db: self.assertEqual(db.execute('SELECT count(*) FROM manager_comments WHERE done=0').fetchone()[0], 0)
+
+    def test_uses_idle_sibling_agent(self):
+        self.seed(); self.linked(); self.plan()
+        self.rows[0]['terminals'][0]['state'] = 'Working'
+        self.rows[0]['terminals'].append(self.terminal('t2', 'codex', 'Review'))
+        with patch.object(manager, 'tell', return_value=True) as tell: self.follow()
+        self.assertEqual(tell.call_args.args[1], 't2')
+
+    def test_saved_plans_deliver_without_waiting_for_unclassified_comments(self):
+        item = self.seed(plan=dict(action='follow', message='Saved fix.')); self.linked()
+        with self.db() as db:
+            db.execute('INSERT INTO manager_comments(id,payload) VALUES (?,?)', ('comment:2', json.dumps(dict(item, id='comment:2'))))
+        comments.follow_up(self.bridge, self.rows, manager.transaction, manager.brain, manager.untrusted, manager._act_one, classify=False)
+        self.consult.assert_not_called()
+        self.assertEqual(self.done(), 1)
+
     def test_routes_and_deduplicates_successful_delivery(self):
         self.seed(); self.linked(); self.plan()
         self.follow(); self.follow()

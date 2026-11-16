@@ -500,7 +500,7 @@ def _act_one(bridge, item, stream, trigger, summary, exclude):
         return "comment monitoring is disabled"
     if guarded:
         with transaction(bridge) as db:
-            if store.nudges(db, terminal) >= store.MAX_NUDGES:
+            if trigger == "sweep" and store.nudges(db, terminal) >= store.MAX_NUDGES:
                 if not db.execute("SELECT 1 FROM manager_asks WHERE terminal=? AND status='open'",
                                   (terminal,)).fetchone():
                     store.open_ask(db, stream, terminal, NUDGE_CAP, [], "")
@@ -516,8 +516,14 @@ def _act_one(bridge, item, stream, trigger, summary, exclude):
     if action == "restart" and not restart(bridge, terminal):
         return "could not restart"
     with transaction(bridge) as db:
-        if guarded:
+        if trigger == "sweep":
             store.add_nudge(db, terminal)
+        elif trigger == "comments" and action == "tell":
+            # External feedback is new work, not another attempt to push the same stalled turn.
+            store.terminal_row(db, terminal)
+            db.execute("UPDATE manager_terminals SET nudges=0 WHERE terminal=?", (terminal,))
+            db.execute("UPDATE manager_asks SET status='resolved' WHERE terminal=? AND summary=? AND status='open'",
+                       (terminal, NUDGE_CAP))
         store.record_event(db, stream, terminal, trigger, action, summary, {"message": message})
     return None
 
