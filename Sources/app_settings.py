@@ -72,8 +72,13 @@ def perform(bridge, action, payload=None):
             else:
                 comments.gh('user')
                 comments.gh('notifications?per_page=1')
-        except Exception:
+        except Exception as exc:
             raise ValueError('Linear connection failed. Check the key and read access.' if action == 'test-linear'
-                             else 'GitHub connection failed. Run gh auth login and grant repo or notifications access.') from None
+                             else comments.github_error(exc)) from None
+        if action == 'test-github':
+            with manager.transaction(bridge) as db:
+                if store.setting(db, 'comments_error_github') == (
+                        'GitHub comment monitoring unavailable. Check gh auth status and repo/notifications access.'):
+                    store.set_setting(db, 'comments_error_github', '')
         return dict(ok=True, message='Linear connection verified.' if action == 'test-linear' else 'GitHub connection verified.')
     raise ValueError('Unknown settings action.')

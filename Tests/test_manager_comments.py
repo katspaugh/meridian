@@ -207,6 +207,32 @@ class CommentTests(Fixture):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_github_errors_distinguish_auth_access_network_and_rate_limits(self):
+        for status, kind in ((401, 'auth'), (403, 'access'), (404, 'not-found'), (429, 'rate-limit'), (502, 'network')):
+            result = Mock(returncode=1, stdout='', stderr=f'secret diagnostic (HTTP {status})')
+            with patch.object(comments.subprocess, 'run', return_value=result):
+                with self.assertRaises(comments.GitHubFailure) as raised:
+                    comments.gh('user')
+            self.assertEqual(raised.exception.kind, kind)
+            self.assertNotIn('secret', str(raised.exception))
+        with patch.object(comments.subprocess, 'run', side_effect=FileNotFoundError()):
+            with self.assertRaises(comments.GitHubFailure) as raised:
+                comments.gh('user')
+        self.assertEqual(raised.exception.kind, 'missing-cli')
+        with patch.object(comments.subprocess, 'run', side_effect=subprocess.TimeoutExpired('gh', 60)):
+            with self.assertRaises(comments.GitHubFailure) as raised:
+                comments.gh('user')
+        self.assertEqual(raised.exception.kind, 'network')
+
+    def test_partial_resource_failure_is_not_reported_as_login_failure(self):
+        failure = comments.PartialFetch([], [('pull/12', 'not-found'), ('pull/12', 'not-found')])
+        message = comments.github_error(failure)
+        self.assertIn('GitHub is connected', message)
+        self.assertIn('1 source', message)
+        self.assertNotIn('auth', message)
+        self.assertNotIn('login', message)
+        self.assertNotIn('auth', comments.github_error(comments.PartialFetch([], [('pull/12', 'network')])))
+
     def test_linear_prefers_environment_without_reading_keychain(self):
         with patch.dict(comments.os.environ, {'LINEAR_API_KEY': 'test-env-key'}), patch.object(comments.subprocess, 'run') as run:
             self.assertEqual(comments.linear_token(), 'test-env-key')

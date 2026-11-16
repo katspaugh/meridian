@@ -13,9 +13,39 @@ import manager_store as store
 
 INTERVAL = 300
 GITHUB = re.compile(r'https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)', re.I)
+class GitHubFailure(ValueError):
+    MESSAGES = {
+        'auth': 'GitHub credentials were rejected. Check gh auth status for github.com.',
+        'missing-cli': 'GitHub CLI was not found. Install gh to connect GitHub.',
+        'network': 'GitHub could not be reached. Monitoring will retry automatically.',
+        'rate-limit': 'GitHub rate limit reached. Monitoring will retry automatically.',
+        'access': 'GitHub denied access to this resource. Check repository or notification permissions.',
+        'not-found': 'This GitHub resource is missing or inaccessible.',
+        'request': 'A GitHub request failed. Monitoring will retry automatically.',
+    }
+
+    def __init__(self, kind):
+        self.kind = kind if kind in self.MESSAGES else 'request'
+        super().__init__(self.MESSAGES[self.kind])
+
+
 class PartialFetch(Exception):
-    def __init__(self, items):
+    def __init__(self, items, failures=()):
         self.items = items
+        self.failures = failures
+
+
+def github_error(exc):
+    if isinstance(exc, GitHubFailure):
+        return str(exc)
+    if isinstance(exc, PartialFetch):
+        failures = exc.failures
+        inaccessible = {target for target, kind in failures if kind in ('not-found', 'access')}
+        if inaccessible and len(inaccessible) == len({target for target, _ in failures}):
+            return (f'GitHub is connected. {len(inaccessible)} source(s) are missing or inaccessible; '
+                    'other comments are still being monitored.')
+        return 'Some GitHub comment requests failed; available comments are still being monitored. Retrying automatically.'
+    return GitHubFailure.MESSAGES['request']
 
 
 LINEAR = re.compile(r'https://linear\.app/(?:[\w-]+/)?issue/([a-z][a-z0-9]*-\d+)', re.I)
@@ -51,10 +81,34 @@ def gh(path, paginate=False):
     args = ['gh', 'api', '--method', 'GET', path]
     if paginate:
         args += ['--paginate', '--slurp']
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise GitHubFailure('missing-cli') from None
+    except (OSError, subprocess.TimeoutExpired):
+        raise GitHubFailure('network') from None
     if proc.returncode:
-        raise ValueError('GitHub comments unavailable; check gh auth status and repo/notifications access.')
-    value = json.loads(proc.stdout)
+        # Classify stderr but never expose it: CLI diagnostics can include sensitive data.
+        status = re.search(r'HTTP (\d{3})', proc.stderr or '')
+        status = int(status[1]) if status else None
+        detail = (proc.stderr or '').lower()
+        if status == 401 or proc.returncode == 4:
+            kind = 'auth'
+        elif status == 429 or 'rate limit' in detail:
+            kind = 'rate-limit'
+        elif status == 403:
+            kind = 'access'
+        elif status == 404:
+            kind = 'not-found'
+        elif status and status >= 500 or any(word in detail for word in ('connection', 'resolve host', 'timeout', 'network')):
+            kind = 'network'
+        else:
+            kind = 'request'
+        raise GitHubFailure(kind)
+    try:
+        value = json.loads(proc.stdout)
+    except ValueError:
+        raise GitHubFailure('request') from None
     return [item for page in value for item in page] if paginate else value
 
 
@@ -67,11 +121,12 @@ def github(rows, since):
             if match:
                 targets[(match[1], match[3])] = match[2] == 'pull'
     # Read notifications as well as saved links, so unmatched work can reach the boss.
-    failed = False
+    failures = []
     try:
         notifications = gh('notifications?' + urlencode(dict(all='true', per_page=50, since=since)), True)
-    except Exception:
-        notifications, failed = [], True
+    except Exception as exc:
+        notifications = []
+        failures.append(('notifications', getattr(exc, 'kind', 'request')))
     for notification in notifications:
         subject = notification.get('subject') or {}
         match = re.fullmatch(r'https://api.github.com/repos/([\w.-]+/[\w.-]+)/(issues|pulls)/(\d+)', subject.get('url') or '')
@@ -87,8 +142,8 @@ def github(rows, since):
         for path, kind in endpoints:
             try:
                 items = gh(path, True)
-            except Exception:
-                failed = True
+            except Exception as exc:
+                failures.append((target, getattr(exc, 'kind', 'request')))
                 continue
             for item in items:
                 when = item.get('updated_at') or item.get('submitted_at') or item.get('created_at') or ''
@@ -97,8 +152,8 @@ def github(rows, since):
                     continue
                 found.append(dict(id=f'github:{kind}:{item["id"]}:{when}', target=target,
                                   url=item.get('html_url') or target, author=author, body=item['body']))
-    if failed:
-        raise PartialFetch(found)
+    if failures:
+        raise PartialFetch(found, failures)
     return found
 
 
@@ -187,7 +242,7 @@ def poll(bridge, rows, transaction):
                         db.execute('INSERT OR IGNORE INTO manager_comments (id,payload) VALUES (?,?)',
                                    (item['id'], json.dumps(item)))
             # Never persist exception strings: HTTP or CLI errors can contain credentials.
-            message = ('GitHub comment monitoring unavailable. Check gh auth status and repo/notifications access.' if name == 'github'
+            message = (github_error(exc) if name == 'github'
                        else 'Linear comment monitoring unavailable. Check the Meridian Linear Keychain credential or LINEAR_API_KEY and read access.')
             with transaction(bridge) as db:
                 if store.setting(db, 'comments_error_' + name) != message:

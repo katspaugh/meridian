@@ -61,6 +61,16 @@ class SettingsTests(Fixture):
 
     def test_connection_errors_are_sanitized(self):
         with patch.object(app_settings.comments, 'gh', side_effect=ValueError('secret response')):
-            with self.assertRaisesRegex(ValueError, 'GitHub connection failed') as raised:
+            with self.assertRaisesRegex(ValueError, 'GitHub request failed') as raised:
                 app_settings.perform(self.bridge, 'test-github')
         self.assertNotIn('secret', str(raised.exception))
+
+    def test_verified_account_clears_legacy_login_warning_only(self):
+        legacy = 'GitHub comment monitoring unavailable. Check gh auth status and repo/notifications access.'
+        for warning, expected in ((legacy, ''), ('Some comment requests failed.', 'Some comment requests failed.')):
+            with self.db() as db:
+                store.set_setting(db, 'comments_error_github', warning)
+            with patch.object(app_settings.comments, 'gh', return_value={}):
+                app_settings.perform(self.bridge, 'test-github')
+            with self.db() as db:
+                self.assertEqual(store.setting(db, 'comments_error_github'), expected)
