@@ -102,10 +102,24 @@ def github(rows, since):
     return found
 
 
-def linear_query(query, variables):
+def linear_token():
     token = os.environ.get('LINEAR_API_KEY')
+    if token:
+        return token
+    # The app can launch from Finder without inheriting a shell environment.
+    # Capture stdout: security writes the credential there, never to our logs.
+    try:
+        result = subprocess.run(['/usr/bin/security', 'find-generic-password', '-s', 'local.meridian.linear',
+                                 '-a', 'comments', '-w'], capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+
+
+def linear_query(query, variables):
+    token = linear_token()
     if not token:
-        raise ValueError('Linear comments unavailable; set LINEAR_API_KEY in the app environment and restart Meridian.')
+        raise ValueError('Linear comments unavailable; configure the Meridian Linear Keychain credential or LINEAR_API_KEY.')
     request = Request('https://api.linear.app/graphql',
                       data=json.dumps(dict(query=query, variables=variables)).encode(),
                       headers={'Authorization': token, 'Content-Type': 'application/json'})
@@ -174,7 +188,7 @@ def poll(bridge, rows, transaction):
                                    (item['id'], json.dumps(item)))
             # Never persist exception strings: HTTP or CLI errors can contain credentials.
             message = ('GitHub comment monitoring unavailable. Check gh auth status and repo/notifications access.' if name == 'github'
-                       else 'Linear comment monitoring unavailable. Set LINEAR_API_KEY in the app environment and check read access.')
+                       else 'Linear comment monitoring unavailable. Check the Meridian Linear Keychain credential or LINEAR_API_KEY and read access.')
             with transaction(bridge) as db:
                 if store.setting(db, 'comments_error_' + name) != message:
                     store.record_event(db, '', '', 'comments', 'unavailable', message)

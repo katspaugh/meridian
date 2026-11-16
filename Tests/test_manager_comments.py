@@ -1,5 +1,6 @@
 """Comment intake and delivery use fake providers and terminals; no external writes."""
 import json
+import subprocess
 from unittest.mock import Mock, patch
 import unittest
 
@@ -161,6 +162,25 @@ class CommentTests(Fixture):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_linear_prefers_environment_without_reading_keychain(self):
+        with patch.dict(comments.os.environ, {'LINEAR_API_KEY': 'test-env-key'}), patch.object(comments.subprocess, 'run') as run:
+            self.assertEqual(comments.linear_token(), 'test-env-key')
+        run.assert_not_called()
+
+    def test_linear_reads_keychain_when_environment_missing(self):
+        with patch.dict(comments.os.environ, {}, clear=True), patch.object(comments.subprocess, 'run',
+                return_value=Mock(returncode=0, stdout='test-keychain-key\n')) as run:
+            self.assertEqual(comments.linear_token(), 'test-keychain-key')
+        self.assertIn('local.meridian.linear', run.call_args.args[0])
+        self.assertTrue(run.call_args.kwargs['capture_output'])
+
+    def test_keychain_failure_or_timeout_returns_no_credential(self):
+        with patch.dict(comments.os.environ, {}, clear=True):
+            with patch.object(comments.subprocess, 'run', return_value=Mock(returncode=44, stdout='')):
+                self.assertEqual(comments.linear_token(), '')
+            with patch.object(comments.subprocess, 'run', side_effect=subprocess.TimeoutExpired('security', 10)):
+                self.assertEqual(comments.linear_token(), '')
+
     def test_github_fetches_issue_inline_and_review_comments_and_unmatched_notifications(self):
         paths = []
         def gh(path, paginate=False):
