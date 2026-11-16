@@ -7,11 +7,17 @@ import os
 import re
 import subprocess
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
 import manager_store as store
 
 INTERVAL = 300
 GITHUB = re.compile(r'https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)', re.I)
+class PartialFetch(Exception):
+    def __init__(self, items):
+        self.items = items
+
+
 LINEAR = re.compile(r'https://linear\.app/(?:[\w-]+/)?issue/([a-z][a-z0-9]*-\d+)', re.I)
 
 
@@ -38,7 +44,7 @@ def stamp():
 
 
 def overlap(value):
-    return (datetime.fromisoformat(value.replace('Z', '+00:00')) - timedelta(seconds=60)).isoformat()
+    return (datetime.fromisoformat(value.replace('Z', '+00:00')) - timedelta(seconds=60)).isoformat().replace('+00:00', 'Z')
 
 
 def gh(path, paginate=False):
@@ -61,7 +67,12 @@ def github(rows, since):
             if match:
                 targets[(match[1], match[3])] = match[2] == 'pull'
     # Read notifications as well as saved links, so unmatched work can reach the boss.
-    for notification in gh('notifications?all=true&per_page=50&since=' + since, True):
+    failed = False
+    try:
+        notifications = gh('notifications?' + urlencode(dict(all='true', per_page=50, since=since)), True)
+    except Exception:
+        notifications, failed = [], True
+    for notification in notifications:
         subject = notification.get('subject') or {}
         match = re.fullmatch(r'https://api.github.com/repos/([\w.-]+/[\w.-]+)/(issues|pulls)/(\d+)', subject.get('url') or '')
         if match:
@@ -74,13 +85,20 @@ def github(rows, since):
             endpoints += [(f'repos/{repo}/pulls/{number}/comments?per_page=100', 'inline'),
                           (f'repos/{repo}/pulls/{number}/reviews?per_page=100', 'review')]
         for path, kind in endpoints:
-            for item in gh(path, True):
+            try:
+                items = gh(path, True)
+            except Exception:
+                failed = True
+                continue
+            for item in items:
                 when = item.get('updated_at') or item.get('submitted_at') or item.get('created_at') or ''
                 author = (item.get('user') or {}).get('login', '')
                 if when < since or author == me or not (item.get('body') or '').strip():
                     continue
                 found.append(dict(id=f'github:{kind}:{item["id"]}:{when}', target=target,
                                   url=item.get('html_url') or target, author=author, body=item['body']))
+    if failed:
+        raise PartialFetch(found)
     return found
 
 
@@ -101,8 +119,8 @@ def linear_query(query, variables):
 def linear(rows, since):
     query = '''query($after: String, $since: DateTimeOrDuration!) {
       viewer { id }
-      comments(first: 100, after: $after, filter: {updatedAt: {gte: $since}}) {
-        nodes { id body url updatedAt user { id name }
+      comments(first: 100, after: $after, includeArchived: true, filter: {updatedAt: {gte: $since}}) {
+        nodes { id body url updatedAt resolvedAt parent { resolvedAt } user { id name }
           issue { url assignee { id } creator { id } } }
         pageInfo { hasNextPage endCursor }
       }
@@ -114,7 +132,8 @@ def linear(rows, since):
         for item in data['comments']['nodes']:
             issue, user = item.get('issue') or {}, item.get('user') or {}
             target = issue.get('url', '')
-            if not target or user.get('id') == me or not (item.get('body') or '').strip():
+            if (not target or user.get('id') == me or item.get('resolvedAt')
+                    or (item.get('parent') or {}).get('resolvedAt') or not (item.get('body') or '').strip()):
                 continue
             relevant = matching(rows, target) or any((issue.get(field) or {}).get('id') == me for field in ('assignee', 'creator'))
             if not relevant and me not in item['body']:
@@ -147,7 +166,12 @@ def poll(bridge, rows, transaction):
                                (item['id'], json.dumps(item)))
                 store.set_setting(db, key, now)
                 store.set_setting(db, 'comments_error_' + name, '')
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, PartialFetch):
+                with transaction(bridge) as db:
+                    for item in exc.items:
+                        db.execute('INSERT OR IGNORE INTO manager_comments (id,payload) VALUES (?,?)',
+                                   (item['id'], json.dumps(item)))
             # Never persist exception strings: HTTP or CLI errors can contain credentials.
             message = ('GitHub comment monitoring unavailable. Check gh auth status and repo/notifications access.' if name == 'github'
                        else 'Linear comment monitoring unavailable. Set LINEAR_API_KEY in the app environment and check read access.')
@@ -157,7 +181,7 @@ def poll(bridge, rows, transaction):
                 store.set_setting(db, 'comments_error_' + name, message)
 
 
-def follow_up(bridge, rows, transaction, brain, untrusted, act_one):
+def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None):
     with transaction(bridge) as db:
         pending = db.execute('SELECT id,payload,plan FROM manager_comments WHERE done=0 ORDER BY rowid LIMIT 20').fetchall()
     unplanned = [json.loads(payload) for _, payload, plan in pending if not plan]
@@ -175,6 +199,7 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one):
             if isinstance(plan, dict) and isinstance(plan.get('id'), str) and plan.get('action') in ('ignore', 'follow'):
                 if plan['action'] == 'ignore' or isinstance(plan.get('message'), str) and plan['message'].strip():
                     plans[plan['id']] = plan
+    touched = set()
     for key, payload, saved_plan in pending:
         item = json.loads(payload)
         matches = matching(rows, item['target'])
@@ -222,20 +247,24 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one):
                 db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
             continue
         # Prefer an existing live agent over starting another one alongside active work.
-        terminal = next((t for t in terminals if t.get('state') != 'Offline'), terminals[0])
-        action = 'restart' if terminal.get('state') == 'Offline' else 'tell'
+        terminal = next((t for t in terminals if t.get('live', t.get('state') != 'Offline')), terminals[0])
+        if terminal['id'] in touched:
+            continue
+        action = 'restart' if not terminal.get('live', terminal.get('state') != 'Offline') else 'tell'
         try:
             reason = act_one(bridge, dict(terminal=terminal['id'], action=action, message=message if action == 'tell' else ''),
-                             row['id'], 'comments', 'Follow up on ' + item['url'], None)
+                             row['id'], 'comments', 'Follow up on ' + item['url'], exclude)
         except Exception:
             continue
         # Restart is only a staging step. Keep the comment queued until a prompt was delivered.
+        if reason is None:
+            touched.add(terminal['id'])
         if reason is None and action == 'tell':
             with transaction(bridge) as db:
                 db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
 
 
-def watch(bridge, rows, transaction, brain, untrusted, act_one):
+def watch(bridge, rows, transaction, brain, untrusted, act_one, exclude=None):
     # App refreshes and manual sweeps can overlap. Never deliver the same inbox row concurrently.
     folder = Path(bridge.ROOT) / 'manager'
     folder.mkdir(parents=True, exist_ok=True)
@@ -245,4 +274,4 @@ def watch(bridge, rows, transaction, brain, untrusted, act_one):
         except BlockingIOError:
             return
         poll(bridge, rows, transaction)
-        follow_up(bridge, rows, transaction, brain, untrusted, act_one)
+        follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude)

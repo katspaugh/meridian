@@ -23,8 +23,8 @@ with tempfile.TemporaryDirectory() as home:
     with patch.dict(os.environ, MUXTEROID_HOME=home):
         import streams
 
-ERROR = "The manager could not be reached. Check that Claude Code is signed in, then try again."
-NUDGE_CAP = ("The manager nudged this agent three times and it is waiting again. "
+ERROR = "Meridian could not be reached. Check that Claude Code is signed in, then try again."
+NUDGE_CAP = ("Meridian nudged this agent three times and it is waiting again. "
              "Have a look at where it is stuck.")
 
 
@@ -231,9 +231,9 @@ class RestartTests(Fixture):
 
 
 class SignatureTests(Fixture):
-    def test_sweep_is_due_only_for_what_hooks_cannot_see(self):
+    def test_sweep_runs_for_hook_blind_changes_and_hourly(self):
         self.rows = [self.stream(terminals=[self.terminal("t1", "claude", "Review")])]
-        self.assertIs(manager.state(self.bridge)["sweepDue"], False)
+        self.assertIs(manager.state(self.bridge)["sweepDue"], True)
         self.rows = [self.stream(terminals=[self.terminal("c1", "codex", "Review")])]
         self.assertTrue(manager.state(self.bridge)["sweepDue"])
         self.consult.return_value = {"summary": "Nudged Codex.", "briefing": "All moving.", "actions": []}
@@ -244,7 +244,7 @@ class SignatureTests(Fixture):
         self.assertIs(state["briefingStale"], False)
         with self.db() as db:
             store.set_setting(db, "sweep_time", str(time.time() - 3600))
-        self.assertIs(manager.state(self.bridge)["sweepDue"], False)
+        self.assertIs(manager.state(self.bridge)["sweepDue"], True)
         self.rows[0]["state"] = "Review"
         self.assertIs(manager.state(self.bridge)["briefingStale"], True)
 
@@ -471,7 +471,7 @@ class SweepTests(Fixture):
         self.run.assert_not_called()
         self.assertEqual((self.bridge.launched, self.events()), ([], []))
         self.assertEqual(self.setting("briefing"), "Two streams moving.\n\nNot carried out: "
-                         "tell codex (manager is paused); restart claude (manager is paused)")
+                         "tell codex (Meridian is paused); restart claude (Meridian is paused)")
         self.assertEqual([a["summary"] for a in manager.state(self.bridge)["asks"]], ["Ship it?"])
         self.assertIn("\nYou are paused: return no actions.\n", self.consult.call_args.args[2])
 
@@ -728,8 +728,8 @@ class BridgeActionTests(unittest.TestCase):
             self.assertEqual(store.setting(db, "focus"), "")
 
     def test_state_has_every_key_the_app_decodes(self):
-        self.assertEqual(set(self.state()), {"paused", "briefing", "briefingTime", "briefingStale", "sweepDue",
-                                             "asks", "events", "chat", "unseen"})
+        self.assertEqual(set(self.state()), {"paused", "briefing", "briefingTime", "briefingStale", "sweepDue", "commentErrors",
+                                             "asks", "events", "chat", "unseen", "messages", "unread"})
 
     def test_dismiss_resolves_one_ask_and_seen_marks_events(self):
         with streams.database() as db:

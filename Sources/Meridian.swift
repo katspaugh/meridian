@@ -9,6 +9,8 @@ struct Subagent: Decodable, Identifiable {
 
 struct WorkstreamTerminal: Decodable, Identifiable {
     let id, title, provider, state, detail: String
+    var nowText: String? = nil
+    var nowStarted: Double? = nil
     let session, terminalSocket: String?
     let live, nativeView: Bool
     let agents: [Subagent]
@@ -46,6 +48,8 @@ struct Stream: Decodable, Identifiable {
     let agents: [Subagent]
     let tasks: [BeadsTask]
     let links: [WorkstreamLink]
+    let pipeline: Pipeline?
+    let documents: [WorkstreamDocument]
     let provider: String
     let session: String?
     let terminalSocket: String?
@@ -62,6 +66,38 @@ struct Stream: Decodable, Identifiable {
         state != "Done" && (state == "Needs you" || tasks.contains { $0.status == "blocked" })
     }
     var displayState: String { needsAttention ? "Needs you" : state }
+}
+
+extension Stream {
+    private enum CodingKeys: String, CodingKey {
+        case terminals, agents, tasks, links, pipeline, documents, provider, session, terminalSocket
+        case sourceFolder, worktreeBranch, live, nativeView, id, title, folder, reference, state, detail, created
+    }
+
+    /// A pipeline or document list the app cannot read is dropped, so it never fails the stream or the list.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        terminals = try container.decode([WorkstreamTerminal].self, forKey: .terminals)
+        agents = try container.decode([Subagent].self, forKey: .agents)
+        tasks = try container.decode([BeadsTask].self, forKey: .tasks)
+        links = try container.decode([WorkstreamLink].self, forKey: .links)
+        pipeline = (try? container.decodeIfPresent(Pipeline.self, forKey: .pipeline)) ?? nil
+        documents = (try? container.decode([WorkstreamDocument].self, forKey: .documents)) ?? []
+        provider = try container.decode(String.self, forKey: .provider)
+        session = try container.decodeIfPresent(String.self, forKey: .session)
+        terminalSocket = try container.decodeIfPresent(String.self, forKey: .terminalSocket)
+        sourceFolder = try container.decodeIfPresent(String.self, forKey: .sourceFolder)
+        worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
+        live = try container.decode(Bool.self, forKey: .live)
+        nativeView = try container.decode(Bool.self, forKey: .nativeView)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        folder = try container.decode(String.self, forKey: .folder)
+        reference = try container.decode(String.self, forKey: .reference)
+        state = try container.decode(String.self, forKey: .state)
+        detail = try container.decode(String.self, forKey: .detail)
+        created = try container.decode(String.self, forKey: .created)
+    }
 }
 
 func stateColor(_ state: String) -> Color {
@@ -124,7 +160,7 @@ enum Bridge {
             p.waitUntilExit()
             if traced { WorkstreamLog.record("\(context) bridge exited pid=\(p.processIdentifier) status=\(p.terminationStatus)") }
             if p.terminationStatus != 0 {
-                throw NSError(domain: "Muxteroid", code: Int(p.terminationStatus), userInfo: [
+                throw NSError(domain: "Meridian", code: Int(p.terminationStatus), userInfo: [
                     NSLocalizedDescriptionKey: (try? String(contentsOf: errors, encoding: .utf8)) ?? "Command failed."
                 ])
             }
@@ -273,9 +309,10 @@ struct Dashboard: View {
     @ObservedObject var store: Store
     @ObservedObject var notifications: AttentionNotifications
     @ObservedObject var manager: ManagerStore
-    private enum Pane { case workstream, board, manager }
+    private enum Pane { case workstream, board }
     @State private var expanded: Set<Inbox> = [.active]
     @State private var adding = false
+    @State private var showingCommentInbox = false
     @State private var pane = Pane.workstream
     @State private var selection: String?
     @State private var agentSelection: String?
@@ -476,14 +513,6 @@ struct Dashboard: View {
 
     private var sidebar: some View {
         List {
-            Button { pane = .manager } label: {
-                Label("Manager", systemImage: "person.crop.circle.badge.checkmark")
-                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).disabled(switching)
-            .badge(manager.state?.asks.count ?? 0)
-            .listRowBackground(pane == .manager ? Color.accentColor.opacity(0.16) : Color.clear)
-            .keyboardShortcut("m", modifiers: [.command, .shift])
             Button { pane = .board } label: {
                 Label("Sprint board", systemImage: "rectangle.split.3x1")
                     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
@@ -491,6 +520,14 @@ struct Dashboard: View {
             .buttonStyle(.plain).disabled(switching)
             .listRowBackground(pane == .board ? Color.accentColor.opacity(0.16) : Color.clear)
             .keyboardShortcut("b", modifiers: [.command, .shift])
+            Button { showingCommentInbox = true } label: {
+                Label("Comment follow-ups", systemImage: "bubble.left.and.bubble.right")
+                    .badge(manager.state?.asks.filter { $0.stream.isEmpty }.count ?? 0)
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showingCommentInbox) {
+                CommentInbox(store: manager) { showingCommentInbox = false; adding = true }
+            }
             ForEach(Inbox.allCases, id: \.self) { box in
                 let streams = store.rows.filter(box.includes)
                 DisclosureGroup(isExpanded: Binding(
@@ -515,10 +552,7 @@ struct Dashboard: View {
             } detail: {
                 VStack(spacing: 0) {
                     if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
-                    if pane == .manager {
-                        ManagerView(store: manager, streams: store.rows, openStream: openFromOverview,
-                                    focusedTerminal: selectedTerminalID)
-                    } else if pane == .board {
+                    if pane == .board {
                         SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true })
                     } else if let stream = selected {
                         let terminal = selectedTerminal(stream)
@@ -585,7 +619,7 @@ struct Dashboard: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .navigationTitle(pane == .manager ? "Manager" : pane == .board ? "Sprint board" : (selected?.title ?? "Workstreams"))
+                .navigationTitle(pane == .board ? "Sprint board" : (selected?.title ?? "Workstreams"))
                 .toolbar {
                     Button { adding = true } label: { Label("New workstream", systemImage: "plus") }.keyboardShortcut("n")
                     Button { inspectorVisible.toggle() } label: {
@@ -642,7 +676,7 @@ struct Dashboard: View {
         return { closeTerminal(terminal, in: stream) }
     }
 
-    /// Opening a workstream from the board or the Manager also reveals it in the sidebar.
+    /// Opening a workstream from the board also reveals it in the sidebar.
     private func openFromOverview(_ stream: Stream) {
         selectTerminal(stream, agent: nil)
         expanded.insert(stream.state == "Done" ? .done : .active)
@@ -661,14 +695,18 @@ struct Dashboard: View {
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
+        WorkstreamInspector(stream: stream, manager: manager, openTerminal: { id in
+            if !id.isEmpty { rememberTerminal(id, in: stream) }
+            openFromOverview(stream)
+        }, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
                             terminal: selectedTerminal(stream), busy: store.busy,
+                            clearPipeline: { Task { _ = await store.perform(["pipeline-reset", stream.id]) } },
                             pulls: store.pulls, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
-                if await store.perform(args) != nil {
-                    expanded.insert(stream.state == "Done" ? .active : .done)
+                if await store.perform(args) != nil, reopening {
+                    expanded.insert(.active)
                 }
             }
         }
@@ -679,23 +717,34 @@ private struct CloseWorkstreamTerminalKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct CloseCommandTitleKey: FocusedValueKey {
+    typealias Value = String
+}
+
 extension FocusedValues {
     var closeWorkstreamTerminal: (() -> Void)? {
         get { self[CloseWorkstreamTerminalKey.self] }
         set { self[CloseWorkstreamTerminalKey.self] = newValue }
     }
+
+    /// The close command's title in a window that closes something other than a terminal.
+    var closeCommandTitle: String? {
+        get { self[CloseCommandTitleKey.self] }
+        set { self[CloseCommandTitleKey.self] = newValue }
+    }
 }
 
 struct TerminalCommands: Commands {
     @FocusedValue(\.closeWorkstreamTerminal) private var closeTerminal
+    @FocusedValue(\.closeCommandTitle) private var closeTitle
 
     var body: some Commands {
         CommandGroup(replacing: .appTermination) {
-            Button("Quit Muxteroid") { NSApp.terminate(nil) }
+            Button("Quit Meridian") { NSApp.terminate(nil) }
                 .keyboardShortcut("q", modifiers: .command)
         }
         CommandGroup(after: .newItem) {
-            Button("Close Terminal") { closeTerminal?() }
+            Button(closeTitle ?? "Close Terminal") { closeTerminal?() }
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(closeTerminal == nil)
         }
@@ -782,16 +831,20 @@ struct NewStream: View {
     }
 }
 
-@main struct MuxteroidApp: App {
+@main struct MeridianApp: App {
     @NSApplicationDelegateAdaptor(AttentionNotifications.self) private var notifications
     @Environment(\.openWindow) private var openWindow
     var body: some Scene {
-        Window("Muxteroid", id: "dashboard") {
+        Window("Meridian", id: "dashboard") {
             Dashboard(store: notifications.store, notifications: notifications, manager: notifications.manager)
         }.defaultSize(width: 1080, height: 760)
         .commands { TerminalCommands() }
         .onChange(of: notifications.destination) { _, id in
             if id != nil { openWindow(id: "dashboard") }
         }
+        WindowGroup("Document", id: "document", for: URL.self) { $url in
+            if let url { DocumentWindow(url: url) }
+        }.defaultSize(width: 760, height: 820)
+        .commandsRemoved()
     }
 }

@@ -82,11 +82,13 @@ class CommentTests(Fixture):
     def test_restart_keeps_comment_until_prompt_delivered(self):
         self.seed(); self.plan(); self.linked()
         self.rows[0]['terminals'][0]['state'] = 'Offline'
+        self.rows[0]['terminals'][0]['live'] = False
         with patch.object(manager, 'restart', return_value=True) as restart:
             self.follow()
         restart.assert_called_once()
         self.assertEqual(self.done(), 0)
         self.rows[0]['terminals'][0]['state'] = 'Review'
+        self.rows[0]['terminals'][0]['live'] = True
         self.follow()
         self.assertEqual(self.done(), 1)
 
@@ -132,6 +134,24 @@ class CommentTests(Fixture):
         events = manager.state(self.bridge)['events']
         self.assertEqual(len(events), 1)
         self.assertNotIn('secret', str(events))
+
+    def test_partial_fetch_saves_available_comments_without_advancing_checkpoint(self):
+        item = dict(id='new:1', target='url', body='Fix it', url='url', author='A')
+        with self.db() as db:
+            store.set_setting(db, 'comments_since_github', '2026-11-16T00:00:00Z')
+        with patch.object(comments, 'github', side_effect=comments.PartialFetch([item])), patch.object(comments, 'linear', return_value=[]):
+            comments.poll(self.bridge, self.rows, manager.transaction)
+        with self.db() as db:
+            self.assertEqual(store.setting(db, 'comments_since_github'), '2026-11-16T00:00:00Z')
+            self.assertEqual(db.execute('SELECT id FROM manager_comments').fetchone()[0], 'new:1')
+
+    def test_offline_review_terminal_is_restarted(self):
+        self.seed(); self.plan(); self.linked()
+        self.rows[0]['terminals'][0]['live'] = False
+        with patch.object(manager, 'restart', return_value=True) as restart:
+            self.follow()
+        restart.assert_called_once()
+        self.assertEqual(self.done(), 0)
 
     def test_quiet_workstreams_still_trigger_comment_polling(self):
         with patch.object(manager.brain, 'config', return_value={}):

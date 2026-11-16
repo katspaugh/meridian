@@ -10,7 +10,8 @@ import uuid
 import workstream_log as trace
 
 CHORD = "ctrl+x ctrl+y"
-COMMAND = "command:muxteroid-view"
+COMMAND = "command:meridian-view"
+LEGACY_COMMAND = "command:muxteroid-view"
 
 
 def ensure_shortcut():
@@ -32,12 +33,12 @@ def ensure_shortcut():
         for item in blocks:
             if item["context"] in ("Chat", "Global"):
                 bindings.update(item["bindings"])
-        if bindings.get(CHORD) == COMMAND:
+        if bindings.get(CHORD) in (COMMAND, LEGACY_COMMAND):
             return False
     except (ValueError, KeyError, TypeError):
         pass
     raise ValueError(f'Add "{CHORD}": "{COMMAND}" to the Chat bindings in {path}, '
-                     'or type /muxteroid-view in Claude to open the selection.')
+                     'or type /meridian-view in Claude to open the selection.')
 
 
 def switch(db, root, socket_path, key, identity):
@@ -83,4 +84,4 @@ def switch(db, root, socket_path, key, identity):
                 return "shown"
             time.sleep(0.08)
         raise ValueError("Claude did not confirm the switch. Close any open dialog and try again, "
-                         "or run /muxteroid-view in the terminal.")
+                         "or run /meridian-view in the terminal.")
