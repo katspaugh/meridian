@@ -58,15 +58,55 @@ class CommentTests(Fixture):
         self.follow(); self.follow()
         asks = manager.state(self.bridge)['asks']
         self.assertEqual(len(asks), 1)
-        self.assertIn('Open a new workstream', asks[0]['summary'])
+        self.assertIn('New workstream needed', asks[0]['summary'])
+        self.assertLess(len(asks[0]['summary']), 190)
+        self.assertTrue(asks[0]['recommendation'].startswith('https://'))
         self.run.assert_not_called()
 
-    def test_ambiguous_match_does_not_choose_an_agent(self):
+    def test_multiple_matches_choose_an_agent_without_asking(self):
         self.seed(); self.plan(); self.linked()
         other = self.stream(id='w2'); other['links'] = self.rows[0]['links']
         self.rows.append(other)
         self.follow()
-        self.assertIn('more than one', manager.state(self.bridge)['asks'][0]['summary'])
+        self.assertEqual(manager.state(self.bridge)['asks'], [])
+        self.assertEqual(self.done(), 1)
+        self.assertEqual(len(self.typed()), 2)
+
+    def test_prefers_active_stream_and_keeps_choice_for_retries(self):
+        self.seed(); self.plan(); self.linked()
+        self.rows[0]['state'] = 'Done'
+        other = self.stream(id='w2', terminals=[self.terminal('t2', 'codex', 'Review', stream='w2')])
+        other['links'] = self.rows[0]['links']
+        self.rows.append(other)
+        with patch.object(manager, 'tell', return_value=False) as tell:
+            self.follow()
+            self.rows[0]['state'] = 'Working'
+            self.follow()
+        self.assertEqual([call.args[1] for call in tell.call_args_list], ['t2', 't2'])
+        self.assertEqual(manager.state(self.bridge)['asks'], [])
+
+    def test_existing_choice_questions_are_requeued_once(self):
+        item = self.seed(plan=dict(action='follow', message='Fix it.'))
+        self.linked()
+        with self.db() as db:
+            db.execute('UPDATE manager_comments SET done=1')
+            store.open_ask(db, '', '', 'Choose the workstream for this comment; more than one has the same link: '
+                           + 'Fix it.\n\nComment: ' + item['url'], [], 'Choose one of: w1, w2')
+            store.open_ask(db, '', '', 'Unrelated owner decision', [], '')
+        self.follow(); self.follow()
+        self.assertEqual(self.done(), 1)
+        self.assertEqual(len(self.typed()), 2)
+        self.assertEqual([ask['summary'] for ask in manager.state(self.bridge)['asks']], ['Unrelated owner decision'])
+        self.consult.assert_not_called()
+
+    def test_dismissed_choice_question_is_not_replayed(self):
+        item = self.seed(plan=dict(action='follow', message='Fix it.'))
+        with self.db() as db:
+            db.execute('UPDATE manager_comments SET done=1')
+            ask = store.open_ask(db, '', '', 'Choose the workstream for this comment; more than one has the same link: '
+                                 + 'Fix it.\n\nComment: ' + item['url'], [], '')
+            store.resolve_asks(db, ask_id=ask)
+        self.follow()
         self.run.assert_not_called()
 
     def test_reopens_completed_stream_before_delivery(self):

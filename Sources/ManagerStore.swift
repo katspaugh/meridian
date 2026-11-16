@@ -226,14 +226,34 @@ struct CommentInbox: View {
                 ForEach(store.state?.commentErrors ?? [], id: \.self) { Text($0).font(.callout).textSelection(.enabled) }
                 if asks.isEmpty { Text("No comments need a new workstream.").foregroundStyle(.secondary) }
                 ForEach(asks) { ask in
-                    ManagerAskDetails(ask: ask)
-                    HStack {
-                        Button("New workstream", action: newWorkstream)
-                        Button("Dismiss") { Task { await store.dismiss(ask) } }
-                    }
+                    CommentFollowUpCard(ask: ask, store: store, newWorkstream: newWorkstream)
                     Divider()
                 }
             }.padding(16)
         }.frame(width: 420, height: 360)
+    }
+}
+
+
+private struct CommentFollowUpCard: View {
+    let ask: ManagerAsk
+    @ObservedObject var store: ManagerStore
+    let newWorkstream: () -> Void
+    private var source: URL? {
+        guard let url = URL(string: ask.recommendation), url.scheme == "https" else { return nil }
+        return url
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(ask.summary).font(.callout).lineLimit(3)
+            HStack {
+                if let source { Link("View comment", destination: source) }
+                Button("New workstream", action: newWorkstream)
+                Button("Dismiss") { Task { await store.dismiss(ask) } }
+            }.controlSize(.small)
+            if ask.summary.count > 190 || (source == nil && !ask.recommendation.isEmpty) {
+                DisclosureGroup("Details") { ManagerAskDetails(ask: ask).font(.callout) }
+            }
+        }
     }
 }
