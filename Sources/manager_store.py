@@ -2,6 +2,7 @@
 import hashlib
 import json
 import time
+
 from typing import Optional
 
 APPROVAL_TTL = 600
@@ -11,6 +12,8 @@ MAX_NUDGES = 3
 
 
 def initialize(db):
+    import manager_comments
+    manager_comments.initialize(db)
     db.execute("""CREATE TABLE IF NOT EXISTS manager_events (id INTEGER PRIMARY KEY AUTOINCREMENT, time REAL,
                stream TEXT, terminal TEXT, trigger TEXT, verdict TEXT, summary TEXT, detail TEXT, seen INTEGER DEFAULT 0)""")
     db.execute("""CREATE TABLE IF NOT EXISTS manager_asks (id INTEGER PRIMARY KEY AUTOINCREMENT, time REAL,

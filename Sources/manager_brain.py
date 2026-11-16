@@ -72,6 +72,10 @@ def remember(root, items):
 
 
 def schema(trigger):
+    if trigger == "comment":
+        plan = _object({"id": STRING, "action": {"type": "string", "enum": ["ignore", "follow"]}, "message": STRING},
+                       ["id", "action", "message"])
+        return _object({"plans": {"type": "array", "items": plan}}, ["plans"])
     if trigger == "sweep":
         return _object({"summary": STRING, "briefing": STRING, "actions": ACTIONS, "asks": ASKS},
                        ["summary", "briefing", "actions"])

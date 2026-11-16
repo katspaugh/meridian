@@ -86,6 +86,9 @@ class Fixture(unittest.TestCase):
         patches = [patch.object(manager.brain, "consult", return_value=None), patch.object(manager.brain, "remember"),
                    patch.object(manager.subprocess, "run"), patch.object(manager.time, "sleep")]
         self.consult, self.remember, self.run, self.sleep = [p.start() for p in patches]
+        config = patch.object(manager.brain, "config", return_value={"watch_comments": False})
+        config.start()
+        self.addCleanup(config.stop)
         for p in patches:
             self.addCleanup(p.stop)
 

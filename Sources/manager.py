@@ -11,6 +11,7 @@ import uuid
 
 import manager_brain as brain
 import manager_store as store
+import manager_comments as comments
 import workstream_log
 
 Outcome = collections.namedtuple("Outcome", "output state detail")
@@ -374,8 +375,10 @@ def state(bridge):
         if not due and swept:
             # Nothing is waiting now, so the same wait coming back later is new and due again.
             store.set_setting(db, "sweep_signature", "")
-    result["sweepDue"] = bool(not result["paused"] and due and due != swept
-                              and time.time() - _number(sweep_time) >= SWEEP_INTERVAL)
+    comment_due = (brain.config(bridge.ROOT).get("watch_comments", True)
+                   and time.time() - _number(sweep_time) >= comments.INTERVAL)
+    result["sweepDue"] = bool(not result["paused"] and (comment_due or (due and due != swept
+                              and time.time() - _number(sweep_time) >= SWEEP_INTERVAL)))
     result["briefingStale"] = briefed != overall_signature(rows)
     return result
 
@@ -462,7 +465,7 @@ def _act_one(bridge, item, stream, trigger, summary, exclude):
     """Carries out one action; returns why it was not carried out, or None."""
     terminal, action, message = item["terminal"], item["action"], str(item.get("message") or "")
     # Sweep actions count towards the loop guard; what the boss asked for in chat does not.
-    guarded = trigger == "sweep"
+    guarded = trigger in ("sweep", "comments")
     if guarded:
         with transaction(bridge) as db:
             if store.nudges(db, terminal) >= store.MAX_NUDGES:
@@ -473,6 +476,9 @@ def _act_one(bridge, item, stream, trigger, summary, exclude):
             # Read now, not before the consult: the boss may have switched terminals while it ran.
             if action == "tell" and terminal in (exclude, store.setting(db, "focus")):
                 return "terminal is on screen"
+    with transaction(bridge) as db:
+        if guarded and store.paused(db):
+            return "manager is paused"
     if action == "tell" and not tell(bridge, terminal, message):
         return "terminal is busy or showing a dialog"
     if action == "restart" and not restart(bridge, terminal):
@@ -497,6 +503,9 @@ def sweep(bridge, exclude=None):
     mark_swept(bridge, due)  # Before the consult too, so no second sweep starts while this one runs.
     with transaction(bridge) as db:
         paused = store.paused(db)
+    if not paused and brain.config(bridge.ROOT).get("watch_comments", True):
+        comments.watch(bridge, rows, transaction, brain, untrusted, _act_one)
+        rows, known, folders = _snapshot(bridge)
     try:
         reply = brain.consult(bridge.ROOT, "sweep", SWEEP + ("\n" + SWEEP_PAUSED if paused else "") + "\n\n"
                               + overview(bridge, rows), investigate=True, timeout=270, folders=folders)
