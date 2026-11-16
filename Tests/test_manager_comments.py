@@ -11,6 +11,11 @@ import manager_store as store
 
 
 class CommentTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        with self.db() as db:
+            store.set_setting(db, 'watch_comments', '1')
+
     def seed(self, target='https://github.com/o/r/pull/12', plan=None):
         item = dict(id='comment:1', target=target, url=target + '#comment-1', author='reviewer', body='Fix the empty state.')
         with self.db() as db:

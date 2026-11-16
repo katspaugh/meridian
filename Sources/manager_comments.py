@@ -116,8 +116,8 @@ def linear_token():
         return ''
 
 
-def linear_query(query, variables):
-    token = linear_token()
+def linear_query(query, variables, token=None):
+    token = linear_token() if token is None else token
     if not token:
         raise ValueError('Linear comments unavailable; configure the Meridian Linear Keychain credential or LINEAR_API_KEY.')
     request = Request('https://api.linear.app/graphql',
@@ -197,6 +197,8 @@ def poll(bridge, rows, transaction):
 
 def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None):
     with transaction(bridge) as db:
+        if store.paused(db) or store.setting(db, 'watch_comments') == '0':
+            return
         pending = db.execute('SELECT id,payload,plan FROM manager_comments WHERE done=0 ORDER BY rowid LIMIT 20').fetchall()
     unplanned = [json.loads(payload) for _, payload, plan in pending if not plan]
     plans = {}
@@ -224,7 +226,7 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
             with transaction(bridge) as db:
                 db.execute('UPDATE manager_comments SET plan=? WHERE id=?', (json.dumps(plan), key))
         with transaction(bridge) as db:
-            if store.paused(db):
+            if store.paused(db) or store.setting(db, 'watch_comments') == '0':
                 return
         if plan['action'] == 'ignore':
             with transaction(bridge) as db:

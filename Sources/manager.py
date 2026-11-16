@@ -380,6 +380,12 @@ def _number(value):
         return 0.0
 
 
+def watch_comments(bridge):
+    with transaction(bridge) as db:
+        value = store.setting(db, "watch_comments")
+    return value == "1" if value is not None else brain.config(bridge.ROOT).get("watch_comments", True)
+
+
 def state(bridge):
     with bridge.bridge_lock():
         rows = bridge.streams()
@@ -397,7 +403,7 @@ def state(bridge):
     result['unread'] -= sum(1 for m in excluded if not m['seen'] and m['kind'] != 'status')
     elapsed = time.time() - _number(sweep_time)
     active = any(r.get('state') != 'Done' for r in rows)
-    comment_due = brain.config(bridge.ROOT).get("watch_comments", True) and elapsed >= comments.INTERVAL
+    comment_due = watch_comments(bridge) and elapsed >= comments.INTERVAL
     result["sweepDue"] = bool(not result["paused"] and (comment_due or (active and elapsed >= SWEEP_INTERVAL
                               and ((due and due != swept) or elapsed >= 3600))))
     with transaction(bridge) as db:
@@ -490,6 +496,8 @@ def _act_one(bridge, item, stream, trigger, summary, exclude):
     terminal, action, message = item["terminal"], item["action"], str(item.get("message") or "")
     # Sweep actions count towards the loop guard; what the boss asked for in chat does not.
     guarded = trigger in ("sweep", "comments")
+    if trigger == "comments" and not watch_comments(bridge):
+        return "comment monitoring is disabled"
     if guarded:
         with transaction(bridge) as db:
             if store.nudges(db, terminal) >= store.MAX_NUDGES:
@@ -527,7 +535,7 @@ def sweep(bridge, exclude=None):
     mark_swept(bridge, due)  # Before the consult too, so no second sweep starts while this one runs.
     with transaction(bridge) as db:
         paused = store.paused(db)
-    if not paused and brain.config(bridge.ROOT).get("watch_comments", True):
+    if not paused and watch_comments(bridge):
         comments.watch(bridge, rows, transaction, brain, untrusted, _act_one, exclude)
         rows, known, folders = _snapshot(bridge)
     try:

@@ -131,9 +131,9 @@ enum Inbox: String, CaseIterable {
 }
 
 enum Bridge {
-    static func run(_ args: [String], traceRefresh: Bool = false) async throws -> Data {
+    static func run(_ args: [String], traceRefresh: Bool = false, input: Data? = nil) async throws -> Data {
         try await Task.detached {
-            let p = Process(), output = Pipe()
+            let p = Process(), output = Pipe(), stdin = Pipe()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
             p.arguments = [Bundle.main.url(forResource: "streams", withExtension: "py")!.path] + args
             let action = args[0]
@@ -145,6 +145,7 @@ enum Bridge {
                 p.environment = ProcessInfo.processInfo.environment.merging(["MUXTEROID_TRACE_REFRESH": "1"]) { _, new in new }
             }
             p.standardOutput = output
+            if input != nil { p.standardInput = stdin }
             let errors = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             FileManager.default.createFile(atPath: errors.path, contents: nil)
             defer { try? FileManager.default.removeItem(at: errors) }
@@ -154,6 +155,10 @@ enum Bridge {
             do { try p.run() } catch {
                 if traced { WorkstreamLog.record("\(context) bridge spawn failed") }
                 throw error
+            }
+            if let input {
+                stdin.fileHandleForWriting.write(input)
+                try? stdin.fileHandleForWriting.close()
             }
             if traced { WorkstreamLog.record("\(context) bridge started pid=\(p.processIdentifier)") }
             let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -842,6 +847,7 @@ struct NewStream: View {
         .onChange(of: notifications.destination) { _, id in
             if id != nil { openWindow(id: "dashboard") }
         }
+        Settings { AppSettingsView() }
         WindowGroup("Document", id: "document", for: URL.self) { $url in
             if let url { DocumentWindow(url: url) }
         }.defaultSize(width: 760, height: 820)

@@ -614,6 +614,12 @@ def attach_terminal(path):
 
 
 def main(action, *args):
+    if action == "settings":
+        import app_settings
+        verb, = args
+        payload = json.loads(sys.stdin.read(4096)) if verb in ("preferences", "save-linear") else None
+        print(json.dumps(app_settings.perform(sys.modules[__name__], verb, payload)))
+        return
     if action == "usage":
         import usage_limits
         print(json.dumps(usage_limits.report(ROOT)))
