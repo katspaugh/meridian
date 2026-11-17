@@ -517,34 +517,46 @@ struct Dashboard: View {
     }
 
     private var sidebar: some View {
-        List {
-            Button { pane = .board } label: {
-                Label("Sprint board", systemImage: "rectangle.split.3x1")
-                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).disabled(switching)
-            .listRowBackground(pane == .board ? Color.accentColor.opacity(0.16) : Color.clear)
-            .keyboardShortcut("b", modifiers: [.command, .shift])
-            Button { showingCommentInbox = true } label: {
-                Label("Comment follow-ups", systemImage: "bubble.left.and.bubble.right")
-                    .badge(manager.state?.asks.filter { $0.stream.isEmpty }.count ?? 0)
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showingCommentInbox) {
-                CommentInbox(store: manager) { showingCommentInbox = false; adding = true }
-            }
-            ForEach(Inbox.allCases, id: \.self) { box in
-                let streams = store.rows.filter(box.includes)
-                DisclosureGroup(isExpanded: Binding(
-                    get: { expanded.contains(box) },
-                    set: { if $0 { expanded.insert(box) } else { expanded.remove(box) } }
-                )) {
-                    ForEach(streams) { stream in
-                        streamBranch(stream)
-                    }
-                } label: {
-                    Label(box.rawValue, systemImage: box.icon).badge(streams.count)
+        VStack(spacing: 0) {
+            List {
+                Button { pane = .board } label: {
+                    Label("Sprint board", systemImage: "rectangle.split.3x1")
+                        .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                 }
+                .buttonStyle(.plain).disabled(switching)
+                .listRowBackground(pane == .board ? Color.accentColor.opacity(0.16) : Color.clear)
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                Button { showingCommentInbox = true } label: {
+                    Label("Comment follow-ups", systemImage: "bubble.left.and.bubble.right")
+                        .badge(manager.state?.asks.filter { $0.stream.isEmpty }.count ?? 0)
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showingCommentInbox) {
+                    CommentInbox(store: manager) { showingCommentInbox = false; adding = true }
+                }
+                ForEach(Inbox.allCases, id: \.self) { box in
+                    let streams = store.rows.filter(box.includes)
+                    DisclosureGroup(isExpanded: Binding(
+                        get: { expanded.contains(box) },
+                        set: { if $0 { expanded.insert(box) } else { expanded.remove(box) } }
+                    )) {
+                        ForEach(streams) { stream in
+                            streamBranch(stream)
+                        }
+                    } label: {
+                        Label(box.rawValue, systemImage: box.icon).badge(streams.count)
+                    }
+                }
+            }
+            if pane == .workstream, let stream = selected {
+                Divider()
+                ManagerSlot(stream: stream,
+                            asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
+                            store: manager, openTerminal: { id in
+                    if !id.isEmpty { rememberTerminal(id, in: stream) }
+                    openFromOverview(stream)
+                })
+                .id(stream.id)
             }
         }
         .navigationSplitViewColumnWidth(min: 175, ideal: 215, max: 320)
@@ -700,10 +712,7 @@ struct Dashboard: View {
     }
 
     private func inspector(_ stream: Stream) -> some View {
-        WorkstreamInspector(stream: stream, manager: manager, openTerminal: { id in
-            if !id.isEmpty { rememberTerminal(id, in: stream) }
-            openFromOverview(stream)
-        }, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
+        WorkstreamInspector(stream: stream,
                             terminal: selectedTerminal(stream), busy: store.busy,
                             clearPipeline: { Task { _ = await store.perform(["pipeline-reset", stream.id]) } },
                             pulls: store.pulls, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in

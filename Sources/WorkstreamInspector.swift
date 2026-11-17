@@ -3,9 +3,6 @@ import MarkdownUI
 
 struct WorkstreamInspector: View {
     let stream: Stream
-    @ObservedObject var manager: ManagerStore
-    let openTerminal: (String) -> Void
-    let asks: [ManagerAsk]
     let terminal: WorkstreamTerminal?
     let busy: Bool
     let clearPipeline: () -> Void
@@ -57,8 +54,6 @@ struct WorkstreamInspector: View {
                 }.frame(maxHeight: .infinity)
             }
 
-            Divider()
-            ManagerSlot(stream: stream, asks: asks, store: manager, openTerminal: openTerminal)
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {
