@@ -1,8 +1,8 @@
 export function register(on) {
   on('session.start', async ($, event, next) => {
-    await $.command.register({
-      name: 'muxteroid-view',
-      description: 'Show the conversation selected in the Muxteroid sidebar',
+    for (const name of ['meridian-view', 'muxteroid-view']) await $.command.register({
+      name,
+      description: 'Show the conversation selected in the Meridian sidebar',
       immediate: true,
     })
     return next(event)
@@ -16,7 +16,7 @@ export function register(on) {
     return next(event)
   })
 
-  on('command.run', { command: 'muxteroid-view' }, async $ => {
+  for (const command of ['meridian-view', 'muxteroid-view']) on('command.run', { command }, async $ => {
     const directory = await $.env.get('MUXTEROID_VIEW_DIR')
     const session = await $.session.id()
     const request = JSON.parse(await $.fs.read(directory + '/request.json'))

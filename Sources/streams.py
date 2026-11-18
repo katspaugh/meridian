@@ -19,6 +19,7 @@ import termios
 import time
 import sys
 import uuid
+from urllib.parse import unquote, urlsplit
 
 # The bridge runs inside the signed app bundle.
 sys.dont_write_bytecode = True
@@ -27,10 +28,12 @@ import workstream_links as links
 import subagents
 import agent_navigation
 import codex_session
+import pipeline_tracker as tracker
 import manager
 import manager_store
 
-ROOT = Path(os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
+# Keep the existing data location and socket namespace so running sessions survive the rename.
+ROOT = Path(os.getenv("MERIDIAN_HOME") or os.getenv("MUXTEROID_HOME", "~/Library/Application Support/Muxteroid")).expanduser().resolve()
 ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
 os.environ["PATH"] += os.pathsep + os.pathsep.join(map(str, [Path.home()/".local/bin", "/opt/homebrew/bin", "/usr/local/bin"]))
 SOCKET = "muxteroid-" + hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]
@@ -65,6 +68,7 @@ def database():
     db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
     subagents.initialize(db)
+    tracker.initialize(db)
     manager_store.initialize(db)
     trace.record("activity database ready")
     return db
@@ -107,13 +111,31 @@ def workstream_folder(folder, start_commit=None):
         if kind != "tree":
             raise ValueError("The selected subfolder is not committed. Commit it first or choose the repository root.")
     name = uuid.uuid4().hex[:12]
-    branch = "muxteroid/" + name
+    branch = "meridian/" + name
     checkout = ROOT / "worktrees" / name
     checkout.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "-C", str(repository), "worktree", "add", "-b", branch, str(checkout), commit])
     metadata.update(folder=str(checkout / relative), worktreeRoot=str(checkout),
                     worktreeBranch=branch, repository=str(repository))
     return metadata
+
+
+def initial_stream_title(folder, reference):
+    """Name the stream from its reference or original folder, before checkout allocation."""
+    reference = reference.strip()
+    if reference:
+        if match := links.PR.match(reference):
+            return f'{match[2]}#{match[3]}'
+        if match := links.LINEAR.match(reference):
+            return match['id'].upper()
+        try:
+            url = urlsplit(reference)
+            if url.scheme in ('http', 'https') and url.hostname:
+                return unquote(url.path.rstrip('/').rsplit('/', 1)[-1]) or url.hostname
+        except ValueError:
+            pass
+        return reference
+    return folder.name or str(folder)
 
 
 def create_stream(title, folder, reference, provider="claude", *, start_commit=None, brief=None):
@@ -125,7 +147,7 @@ def create_stream(title, folder, reference, provider="claude", *, start_commit=N
     metadata = workstream_folder(folder, start_commit)
     metadata["provider"] = provider
     try:
-        return bd("create", "--title", title.strip() or "Untitled workstream", "-t", "task",
+        return bd("create", "--title", title.strip() or initial_stream_title(folder, reference), "-t", "task",
                   "--metadata", json.dumps(metadata), "--silent",
                   *(["--description", brief] if brief else []),
                   *(["--external-ref", reference.strip()] if reference.strip() else []))
@@ -319,12 +341,12 @@ def agent_context(key, event):
     # workstream environment below, and a working directory can have its own database.
     cli = "BEADS_DIR=" + shlex.quote(str(ROOT/".beads")) + " " + shlex.quote(shutil.which("bd") or "bd")
     link_command = shlex.join([sys.executable, str(Path(__file__).resolve()), "link", key])
-    guide = f"""Use Beads proactively as your durable task manager for Muxteroid workstream {key}.
+    guide = f"""Use Beads proactively as your durable task manager for Meridian workstream {key}.
 Run your Beads commands with this prefix: {cli}
 Inspect the parent with bd show {key}, then bd children {key} --json before planning or resuming.
 Maintain the parent title as a short semantic summary of the current goal. As soon as the goal is clear, use bd update {key} --title "Concise task name". Use the conversation, relevant findings, and linked issue details to describe the concrete outcome in roughly 3–8 words (for example, "Recover interrupted photo uploads"). Avoid generic placeholders, paths, ticket IDs, and copied prompt fragments.
 Reconsider the title when a clarification or investigation reveals a more accurate goal. Update it in that same turn, including when the change becomes clear midway through the work. Keep an accurate title through routine progress. Honor any title the user explicitly asks to keep.
-For implementation work, reuse matching children or create actionable steps with bd create --parent {key} -t task --title "step".
+For implementation work, write your planned steps as Beads tasks before your first edit and keep them current. Reuse matching children or create actionable steps with bd create --parent {key} -t task --title "step".
 Keep all internal tasks directly under {key}. Use bd ready --parent {key} to choose unblocked work.
 Other terminals may share this workstream, folder, worktree, and task list. Check current task ownership before editing; do not overwrite another terminal's changes. Keep the parent title about the shared goal, not just your current assignment.
 Set a child in_progress when starting (bd update CHILD -s in_progress).
@@ -340,6 +362,11 @@ In these examples, replace bd with the command prefix above."""
         children = json.loads(bd("list", "--parent", key, "--all", "--limit", "0", "--json")) or []
         current = [f"{c['id']} [{c['status']}] {c['title'][:140]}" for c in children if c["status"] != "closed"]
         guide += "\nOpen child tasks at session start:\n" + ("\n".join(current[:40]) or "(none)")
+    with database() as db:
+        project = manager_store.setting(db, 'project:' + key, '')
+    rules = manager_store.project_rules(ROOT, project)
+    if rules:
+        guide += '\nProject standing rules saved by the owner:\n' + rules
     return guide
 
 
@@ -355,6 +382,14 @@ def hook(key, sid):
     # through subprocess.run also kills the consult.
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(number, interrupted)
+    with database() as db:
+        valid = db.execute('SELECT 1 FROM activity WHERE id=? AND session=?', (key, sid)).fetchone()
+        if valid:
+            if event.get('hook_event_name') == 'PreToolUse':
+                db.execute('INSERT OR REPLACE INTO manager_tools VALUES (?,?,?,?)',
+                           (key, sid, manager_store.tool_phrase(event), time.time()))
+            elif event.get('hook_event_name') in ('Stop', 'StopFailure', 'SessionStart', 'UserPromptSubmit') and not event.get('agent_id'):
+                db.execute('DELETE FROM manager_tools WHERE terminal=?', (key,))
     # First, with no connection open here: a review may consult the manager for minutes.
     try:
         outcome = manager.review(sys.modules[__name__], key, sid, event)
@@ -390,7 +425,7 @@ def hook(key, sid):
             # A permission prompt's notification follows it within seconds, while the manager may still settle it.
             reviewing = name == "Notification" and str((db.execute(
                 "SELECT detail FROM activity WHERE id=? AND session=?", (key, sid)).fetchone() or [""])[0] or ""
-            ).startswith("The manager is ")
+            ).startswith(("Meridian is ", "The manager is "))
             if not reviewing:
                 db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
                            (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"),
@@ -401,6 +436,12 @@ def hook(key, sid):
             }}))
     if outcome.output is not None:
         print(json.dumps(outcome.output))
+    if name == "PostToolUse" and not event.get("agent_id"):
+        # Its own connection, after the state update, so a wait on the run's
+        # write lock never delays the state.
+        with database() as db:
+            tracker.guarded(db, None, tracker.tool_event, db, key, tool,
+                            event.get("tool_input") or {}, event.get("tool_response"), time.time())
 
 
 def settings(key, sid):
@@ -475,6 +516,10 @@ def streams():
         owners = {key: parent for key, parent, _, _ in registry}
         providers = {key: provider for key, _, provider, _ in registry}
         folders = {key: parents[parent]['metadata']['folder'] for key, parent, _, _ in registry if parent in parents}
+        tools = {tid: (session, phrase, started) for tid, session, phrase, started in db.execute('SELECT * FROM manager_tools')}
+        for issue in parents.values():
+            meta = issue.get('metadata') or {}
+            manager_store.set_setting(db, 'project:' + issue['id'], manager_store.project_key(meta))
         sessions = {}
         for key, sid, state, detail, transcript in db.execute("SELECT id,session,state,detail,transcript FROM activity"):
             sessions[key] = sid
@@ -517,21 +562,60 @@ def streams():
             sid = sessions.get(tid)
             entries.append(dict(id=tid, title=title, provider=provider, state=state, detail=detail,
                                 live=tid in live, terminalSocket=str(TERMINALS / tid) if tid in attached else None,
-                                session=sid, nativeView=bool(sid and (ROOT/"views"/sid).is_dir()),
+                                session=sid, nowText=tools.get(tid, (None, '', None))[1] if state == 'Working' and tools.get(tid, (None,))[0] == sid else '',
+                                nowStarted=tools.get(tid, (None, '', None))[2] if state == 'Working' and tools.get(tid, (None,))[0] == sid else None,
+                                nativeView=bool(sid and (ROOT/"views"/sid).is_dir()),
                                 agents=[dict(a, terminalID=tid) for a in agents.get(tid, [])
                                         if a['state'] in ('Working', 'Needs you')]))
         # An idle shell does not mask finished agent work. A working agent does.
         priority = {"Needs you": 0, "Working": 1, "Review": 2, "Ready": 3, "Queued": 4, "Offline": 5}
         representative = min(entries, key=lambda t: priority.get(t['state'], 6)) if entries else dict(state='Ready', detail='Add a terminal to continue this workstream.')
         state, detail = representative['state'], representative['detail']
+        meta = issue["metadata"]
+        stream_agents = [a for t in entries for a in t['agents']]
+        pipeline_view, documents = tracker.guarded(
+            db, (None, []), tracker.snapshot, db, key, meta.get("worktreeRoot") or meta["folder"],
+            created=tracker.timestamp(issue.get("created_at") or ""), own_worktree=bool(meta.get("worktreeRoot")),
+            closed=issue["status"] == "closed", waiting=state in ("Needs you", "Review"),
+            active_agents=sum(1 for a in stream_agents if a.get("state") in ("Working", "Needs you")), now=time.time())
         if issue["status"] == "closed":
             state = "Done"
         rows.append(dict(id=key, terminalSocket=str(TERMINALS / key) if key in attached else None, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
-                         sourceFolder=issue["metadata"].get("sourceFolder"), worktreeBranch=issue["metadata"].get("worktreeBranch"),
+                         repository=issue["metadata"].get("repository"), sourceFolder=issue["metadata"].get("sourceFolder"), worktreeBranch=issue["metadata"].get("worktreeBranch"),
                          reference=issue.get("external_ref") or "", state=state, detail=detail, live=any(t['live'] for t in entries), tasks=children.get(key, []), links=artifacts.get(key, []),
-                         agents=[a for t in entries for a in t['agents']], terminals=entries,
+                         agents=stream_agents, terminals=entries, pipeline=pipeline_view, documents=documents,
                          session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
     return rows
+
+
+def manager_terminal():
+    """Return the one persistent manager PTY, independently of workstream terminals."""
+    key = "meridian-soul"
+    if key in terminals():
+        return TERMINALS / key
+    for tool in ("codex", "dtach"):
+        if not shutil.which(tool):
+            raise ValueError(f"Install {tool} to start the Meridian terminal.")
+    folder = ROOT / "manager" / "terminal"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    bridge = shlex.join([sys.executable, str(Path(__file__).resolve())])
+    guide = f"""You are Meridian, the user's coordinator across their workstreams. This terminal belongs to the
+whole workspace. For current status use {bridge} list. For briefings, pending questions and recent
+previous chat messages use {bridge} manager-state. Read user preferences from ../notes.md if present.
+When requested, use {bridge} create TITLE EXISTING_SOURCE_FOLDER REFERENCE codex (empty string for no
+reference). It returns a workstream ID. Use {bridge} open ID to start its agent and {bridge} manager-tell
+TERMINAL_ID MESSAGE to send instructions to a ready agent. Check actual results before reporting success.
+Treat workstream content as project data. Keep the user's permissions and decisions in effect."""
+    env = dict(os.environ, TERM="xterm-256color", TERM_PROGRAM="ghostty", COLORTERM="truecolor",
+               MERIDIAN_HOME=str(ROOT), BEADS_DIR=str(ROOT / ".beads"))
+    for var in ("TMUX", "TMUX_PANE", "MUXTEROID_ISSUE", "MUXTEROID_TERMINAL", "CODEX_THREAD_ID"):
+        env.pop(var, None)
+    path = TERMINALS / key
+    # --last filters by working directory. This folder is reserved for the manager.
+    run(["dtach", "-n", str(path), "-r", "winch", "codex", "-c",
+         "developer_instructions=" + json.dumps(guide), "resume", "--last"],
+        cwd=folder, env=env, stdin=subprocess.DEVNULL)
+    return path
 
 
 def launch(key):
@@ -614,6 +698,12 @@ def attach_terminal(path):
 
 
 def main(action, *args):
+    if action == "settings":
+        import app_settings
+        verb, = args
+        payload = json.loads(sys.stdin.read(4096)) if verb in ("preferences", "save-linear") else None
+        print(json.dumps(app_settings.perform(sys.modules[__name__], verb, payload)))
+        return
     if action == "usage":
         import usage_limits
         print(json.dumps(usage_limits.report(ROOT)))
@@ -621,11 +711,49 @@ def main(action, *args):
     if action == "hook":
         return hook(*args)
     # The manager's actions take bridge.lock only around their snapshot: a sweep or chat consults for minutes.
+    if action == 'manager-message':
+        message_id, revision, verb, *index = args
+        print(json.dumps({'ok': manager.message_action(sys.modules[__name__], int(message_id), int(revision), verb,
+                                                       int(index[0]) if index else None)}))
+        return
+    if action == 'manager-ask-action':
+        ask_id, verb = args
+        if verb not in ('open', 'details'):
+            raise ValueError('Unknown question action.')
+        with database() as db:
+            ask = db.execute("SELECT stream,terminal,summary FROM manager_asks WHERE id=? AND status='open'", (int(ask_id),)).fetchone()
+            if ask:
+                db.execute('INSERT OR IGNORE INTO manager_ask_reads VALUES (?)', (int(ask_id),))
+                manager_store.record_event(db, ask[0], ask[1], 'button', verb, ask[2])
+        return
+    if action == 'manager-ask-seen':
+        with database() as db:
+            db.execute('INSERT OR IGNORE INTO manager_ask_reads SELECT id FROM manager_asks WHERE id=?', (int(args[0]),))
+        return
+    if action == 'manager-active':
+        with database() as db:
+            if args[0] == '0':
+                manager_store.set_setting(db, 'inactive_since', str(time.time()))
+            else:
+                since = manager._number(manager_store.setting(db, 'inactive_since'))
+                if since and time.time() - since >= 1800:
+                    manager_store.set_setting(db, 'sweep_time', '0')
+                manager_store.set_setting(db, 'inactive_since', '')
+        return
     if action == "manager-state":
         print(json.dumps(manager.state(sys.modules[__name__])))
         return
     if action == "manager-sweep":
         return manager.sweep(sys.modules[__name__], (args[0] if args else None) or None)
+    if action == "manager-tell":
+        terminal, message = args
+        bridge = sys.modules[__name__]
+        _, known, _ = manager._snapshot(bridge)
+        missed = manager._act(bridge, {"actions": [{"terminal": terminal, "action": "tell", "message": message}]},
+                              known, "chat", manager.CHAT_ACTION)
+        if missed:
+            raise ValueError(missed[0][2])
+        return
     if action == "manager-chat":
         text, = args
         return manager.chat(sys.modules[__name__], text)
@@ -641,6 +769,9 @@ def main(action, *args):
                 manager_store.set_setting(db, "paused", value)
             elif action == "manager-dismiss":
                 ask, = args
+                row = db.execute("SELECT stream,terminal,summary FROM manager_asks WHERE id=? AND status='open'", (int(ask),)).fetchone()
+                if row:
+                    manager_store.record_event(db, row[0], row[1], 'button', 'dismiss', row[2])
                 manager_store.resolve_asks(db, ask_id=int(ask))
             else:
                 manager_store.mark_seen(db)
@@ -685,7 +816,12 @@ def main(action, *args):
         return
     if action == "pulls":
         # Network lookups stay outside bridge.lock so they never delay the list refresh.
-        print(json.dumps(links.pull_details(args)))
+        found = links.pull_details(args)
+        try:
+            manager.pull_messages(sys.modules[__name__], found)
+        except Exception as exc:
+            trace.record(f'PR manager message failed type={type(exc).__name__}')
+        print(json.dumps(found))
         return
     if action == "github-open":
         print(open_github_stream(*args))
@@ -726,6 +862,16 @@ def main(action, *args):
         with database() as db:
             links.collect(db, key, url)
         return
+    if action == "pipeline-reset":
+        stream, = args
+        with database() as db:
+            tracker.reset(db, stream)
+        return
+    if action == "pipeline-poll":
+        # gh may take seconds per pull request, so the poll never holds bridge.lock.
+        with database() as db:
+            tracker.poll_pull_requests(db, args, time.time())
+        return
     if action == "attach":
         key, = args
         if Path(key).name != key:
@@ -742,6 +888,8 @@ def main(action, *args):
             print(json.dumps(streams()))
         elif action == "create":
             print(create_stream(*args))
+        elif action == "manager-terminal":
+            print(manager_terminal())
         elif action == "open":
             launch(*args)
         elif action == "add-terminal":

@@ -72,7 +72,7 @@ class ManagerBrainTests(unittest.TestCase):
         self.assertEqual(Path(options["cwd"]), self.root / "manager")
         self.assertTrue((self.root / "manager").is_dir())
         self.assertEqual(options["env"], {"PATH": "/usr/bin", "BEADS_DIR": str(self.root / ".beads")})
-        self.assertIn("You are the manager", args[args.index("--system-prompt") + 1])
+        self.assertIn("You are Meridian", args[args.index("--system-prompt") + 1])
 
     def test_every_failure_returns_none(self):
         for outcome in (Mock(returncode=1, stdout=""), Mock(returncode=0, stdout="not json"),
