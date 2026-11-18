@@ -151,6 +151,7 @@ struct ManagerView: View {
                     ManagerAskDetails(ask: ask).font(.callout)
                     HStack(spacing: 8) {
                         if let stream = stream(ask.stream) {
+                            LinearQuestionAction(stream: stream, ask: ask)
                             Button("Open workstream") { openStream(stream) }
                         }
                         Button("Dismiss") { Task { await store.dismiss(ask) } }

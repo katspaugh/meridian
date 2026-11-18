@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / 'Sources/ManagerStore.swift').read_text()
-source = 'import SwiftUI\nimport AppKit\n' + source[source.index('struct ManagerAskDetails:'):]
+source = 'import SwiftUI\nimport AppKit\n' + source[source.index('struct ManagerAskDetails:'):source.index('struct CommentInbox:')]
 source = source.replace('.frame(height: 120, alignment: .top).clipped().background(.bar)',
     '.frame(height: 120, alignment: .top).clipped().background(.bar)'
     '.onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { Probe.slot = $0 }')
@@ -17,6 +17,7 @@ import SwiftUI
 struct WorkstreamTerminal { let id = "t1"; let live = true; let state = "Review"; let provider = "claude" }
 struct Stream { let id = "w1"; let terminals = [WorkstreamTerminal()] }
 struct ManagerAsk: Identifiable { let options = ["Stable", "Beta"]; let recommendation = "Beta"; let id = 1; let terminal = "t1"; let summary = "Which release channel should receive this build?" }
+struct LinearQuestionAction: View { let stream: Stream; let ask: ManagerAsk; var body: some View { EmptyView() } }
 struct State { var messages = [ManagerMessage]() }
 @MainActor final class ManagerStore: ObservableObject {
     @Published var state: State? = State()

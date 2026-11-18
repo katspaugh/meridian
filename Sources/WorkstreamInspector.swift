@@ -12,6 +12,10 @@ struct WorkstreamInspector: View {
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
     @Environment(\.openWindow) private var openWindow
+    @State private var sharing = false
+    @State private var issueError = ""
+    @State private var issueRefreshing = false
+
     @State private var confirmingCompletion = false
     private var unfinishedTasks: [BeadsTask] { stream.tasks.filter { $0.status != "closed" } }
     /// Most recently linked first, so the newest work stays above "Show more".
@@ -28,13 +32,16 @@ struct WorkstreamInspector: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if stream.pipeline != nil || !stream.documents.isEmpty {
+            if stream.pipeline != nil || !stream.documents.isEmpty || stream.primary != nil || stream.links.contains(where: { $0.kind == "linear" }) {
                 // With a Pipeline section the whole content scrolls, the Tasks header included.
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline,
+                        issueSection
+                        if stream.pipeline != nil || !stream.documents.isEmpty {
+                            PipelineSection(pipeline: stream.pipeline, documents: stream.documents, clear: clearPipeline,
                                         open: { openWindow(id: "document", value: URL(fileURLWithPath: $0.path)) })
-                        Divider()
+                            Divider()
+                        }
                         VStack(alignment: .leading, spacing: 16) {
                             tasksHeader
                             taskList
@@ -73,7 +80,7 @@ struct WorkstreamInspector: View {
                 if stream.terminals.count > 1 {
                     Text("\(stream.terminals.count) terminals · shared task list").font(.caption).foregroundStyle(.secondary)
                 }
-                if !stream.reference.isEmpty { Text(stream.reference).font(.callout).textSelection(.enabled) }
+                if stream.primary == nil && !stream.reference.isEmpty { Text(stream.reference).font(.callout).textSelection(.enabled) }
                 Button(stream.state == "Done" ? "Reopen" : "Mark complete") {
                     if stream.state != "Done" && !unfinishedTasks.isEmpty {
                         confirmingCompletion = true
@@ -94,10 +101,99 @@ struct WorkstreamInspector: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.bar)
         }
+        .sheet(isPresented: $sharing) { LinearHandoff(stream: stream, prs: changes, pulls: pulls) }
+        .task(id: stream.reference) {
+            if !stream.reference.isEmpty && (stream.primary != nil || stream.links.contains { $0.kind == "linear" }) {
+                await refreshIssue()
+            }
+        }
         .task(id: changes.map(\.url)) {
             while !Task.isCancelled {
                 await refreshPulls(changes.map(\.url))
                 do { try await Task.sleep(for: .seconds(60)) } catch { break }
+            }
+        }
+    }
+
+    private func refreshIssue() async {
+        guard !issueRefreshing else { return }
+        issueRefreshing = true
+        defer { issueRefreshing = false }
+        do {
+            _ = try await Bridge.run(["linear-refresh", stream.id])
+            issueError = ""
+        } catch { issueError = error.localizedDescription }
+    }
+
+    @ViewBuilder private var issueSection: some View {
+        if let issue = stream.primary {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Link(issue.identifier, destination: issue.url)
+                    Spacer()
+                    Button { Task { await refreshIssue() } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.plain).disabled(issueRefreshing).accessibilityLabel("Refresh issue")
+                }
+                Text(issue.title).font(.headline)
+                Text("\(issue.status) · \(issue.assignee)").font(.callout).foregroundStyle(.secondary)
+                if !issue.description.isEmpty {
+                    DisclosureGroup("Description and acceptance criteria") {
+                        Markdown(issue.description)
+                            .markdownTextStyle { FontSize(13) }
+                            .markdownImageProvider(.asset).markdownInlineImageProvider(.asset)
+                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                if let changes = issue.changes, !changes.isEmpty {
+                    Text("Changed since last review").fontWeight(.semibold)
+                    ForEach(changes, id: \.self) { Text($0).textSelection(.enabled) }
+                    Button("Mark reviewed") {
+                        Task {
+                            do { _ = try await Bridge.run(["linear-seen", stream.id, issue.revision ?? ""]) }
+                            catch { issueError = error.localizedDescription }
+                        }
+                    }
+                }
+            }.font(.callout)
+        }
+        if !issueError.isEmpty {
+            HStack {
+                Text(issueError).font(.caption).foregroundStyle(.secondary)
+                if !stream.reference.isEmpty {
+                    Button("Retry") { Task { await refreshIssue() } }.disabled(issueRefreshing)
+                }
+            }
+        }
+        let related = stream.links.filter { $0.kind == "linear" && $0.label != stream.primary?.identifier }
+        if !related.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Related issues").font(.headline)
+                ForEach(related) { link in
+                    HStack {
+                        Link(link.label, destination: link.url)
+                        if stream.primary == nil && stream.reference.isEmpty {
+                            Button("Set as primary") {
+                                Task {
+                                    do {
+                                        _ = try await Bridge.run(["linear-pin", stream.id, link.url.absoluteString])
+                                        issueError = ""
+                                    } catch { issueError = error.localizedDescription }
+                                }
+                            }.controlSize(.small)
+                        }
+                    }
+                }
+            }
+        }
+        let replies = (stream.linearQuestions ?? []).filter { $0.reply != nil }
+        if !replies.isEmpty {
+            DisclosureGroup("Linear replies (\(replies.count))") {
+                ForEach(replies) { thread in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Link(thread.summary, destination: thread.url)
+                        Text(thread.reply ?? "").textSelection(.enabled)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
     }
@@ -131,6 +227,9 @@ struct WorkstreamInspector: View {
                 Divider()
                 WorkstreamChanges(links: changes, pulls: pulls, streamID: stream.id,
                                   terminal: stream.state != "Done" && viewingParent ? terminal : nil)
+                if stream.primary != nil {
+                    Button("Share for review…") { sharing = true }
+                }
             }
             if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
                 Divider()

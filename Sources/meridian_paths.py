@@ -42,7 +42,8 @@ def data_root():
     old = support / PREVIOUS_NAME
     current = support / "Meridian"
     override = os.getenv("MERIDIAN_HOME") or os.getenv("MUXTEROID_HOME")
-    if override and Path(override).expanduser().absolute() not in (current, old):
+    separate = current.is_dir() and old.is_dir() and not current.samefile(old)
+    if override and (separate or Path(override).expanduser().absolute() not in (current, old)):
         root = Path(override).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         return root, root

@@ -204,6 +204,11 @@ def run(key, db, directory, beads, guide):
         args = ["codex", "--remote", "unix://"+str(path)]
         if previous:
             args += ["resume",previous]
+        else:
+            import linear_workstreams
+            prompt = linear_workstreams.initial_prompt(db, key)
+            if prompt:
+                args.append(prompt)
         trace.record("Codex socket ready, starting TUI")
         tui = subprocess.Popen(args)
         trace.record(f"Codex TUI started pid={tui.pid}")

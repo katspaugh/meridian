@@ -54,6 +54,8 @@ struct Stream: Decodable, Identifiable {
     let session: String?
     let terminalSocket: String?
     let sourceFolder, worktreeBranch: String?
+    let primary: LinearIssue?
+    let linearQuestions: [LinearQuestion]?
     let live, nativeView: Bool
     let id, title, folder, reference, state, detail, created: String
 
@@ -70,6 +72,7 @@ struct Stream: Decodable, Identifiable {
 
 extension Stream {
     private enum CodingKeys: String, CodingKey {
+        case primary, linearQuestions
         case terminals, agents, tasks, links, pipeline, documents, provider, session, terminalSocket
         case sourceFolder, worktreeBranch, live, nativeView, id, title, folder, reference, state, detail, created
     }
@@ -81,6 +84,8 @@ extension Stream {
         agents = try container.decode([Subagent].self, forKey: .agents)
         tasks = try container.decode([BeadsTask].self, forKey: .tasks)
         links = try container.decode([WorkstreamLink].self, forKey: .links)
+        primary = try container.decodeIfPresent(LinearIssue.self, forKey: .primary)
+        linearQuestions = try container.decodeIfPresent([LinearQuestion].self, forKey: .linearQuestions)
         pipeline = (try? container.decodeIfPresent(Pipeline.self, forKey: .pipeline)) ?? nil
         documents = (try? container.decode([WorkstreamDocument].self, forKey: .documents)) ?? []
         provider = try container.decode(String.self, forKey: .provider)
@@ -637,7 +642,7 @@ struct Dashboard: View {
                             }
                         }
                         // Pull requests are listed under Changes in the inspector.
-                        let issues = stream.links.filter { $0.kind != "pr" }
+                        let issues = stream.links.filter { $0.kind == "github-issue" }
                         if !issues.isEmpty {
                             Divider()
                             ScrollView(.horizontal) {
@@ -646,7 +651,7 @@ struct Dashboard: View {
                                         Link(destination: item.url) {
                                             Label(item.label, systemImage: "circle.hexagongrid")
                                         }
-                                        .accessibilityLabel((item.kind == "github-issue" ? "GitHub issue " : "Linear issue ") + item.label)
+                                        .accessibilityLabel("GitHub issue " + item.label)
                                         .help(item.url.absoluteString)
                                     }
                                 }.font(.callout).padding(.horizontal, 12).padding(.vertical, 7)
@@ -691,7 +696,10 @@ struct Dashboard: View {
             }
         }
         .sheet(isPresented: $adding) {
-            NewStream(store: store, folder: recentFolders.first ?? "", recentFolders: recentFolders) { id, folder in
+            NewStream(store: store, folder: recentFolders.first ?? "", recentFolders: recentFolders) { id, folder, terminal in
+                if let terminal, let stream = store.rows.first(where: { $0.id == id }) {
+                    rememberTerminal(terminal, in: stream)
+                }
                 lastFolder = folder
                 if let data = try? JSONEncoder().encode(recentFolders) {
                     recentFoldersJSON = String(decoding: data, as: UTF8.self)
@@ -792,18 +800,30 @@ struct NewStream: View {
     @Environment(\.dismiss) var dismiss
     @State var folder: String
     var recentFolders: [String]
-    var created: (String, String) -> Void
+    var created: (String, String, String?) -> Void
     @State private var reference = ""
     private var githubURL: String? {
         let value = reference.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.range(of: #"(?i)^https?://github\.com/[\w.-]+/[\w.-]+/(pull|issues)/[1-9]\d*(?:[/?#].*)?$"#,
                            options: .regularExpression) == nil ? nil : value
     }
+    @State private var preview: LinearPreview?
+    @State private var previewed = ""
+    @State private var lookupError = ""
+    @State private var retry = 0
+
+    private var validPreview: LinearPreview? { previewed == reference ? preview : nil }
+    private var primaryAction: String {
+        if githubURL != nil { return "Open workstream" }
+        if let result = validPreview, result.existing != nil {
+            return result.closed ? "Reopen workstream" : "Resume workstream"
+        }
+        return "Create"
+    }
     @AppStorage("newStreamProvider") private var provider = "claude"
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New workstream").font(.title2.bold())
-            TextField("GitHub issue, pull request, or Linear reference (optional)", text: $reference)
             Picker("Agent", selection: $provider) {
                 Text("Claude Code").tag("claude")
                 Text("Codex CLI").tag("codex")
@@ -855,28 +875,72 @@ struct NewStream: View {
             }
             Text("Git repositories get a new branch and worktree shared by all terminals. Other folders are used directly.")
                 .font(.caption).foregroundStyle(.secondary)
+            TextField("GitHub issue, pull request, or Linear reference (optional)", text: $reference)
+                .task(id: "\(reference)|\(retry)") {
+                    let value = reference
+                    preview = nil
+                    lookupError = ""
+                    guard githubURL == nil, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    do {
+                        try await Task.sleep(for: .milliseconds(350))
+                        let data = try await Bridge.run(["linear-preview", value])
+                        let result = try JSONDecoder().decode(LinearPreview.self, from: data)
+                        guard !Task.isCancelled, reference == value else { return }
+                        preview = result
+                        previewed = value
+                    } catch {
+                        if !Task.isCancelled && reference == value { lookupError = error.localizedDescription }
+                    }
+                }
+            if let issue = validPreview?.issue {
+                Text("\(issue.identifier) · \(issue.title)").fontWeight(.semibold)
+                Text("\(issue.status) · \(issue.assignee)").font(.callout)
+                if let existing = store.rows.first(where: { $0.id == validPreview?.existing }) {
+                    Text("Workstream · \(existing.title)").font(.callout).foregroundStyle(.secondary)
+                }
+            } else if !lookupError.isEmpty {
+                Text(lookupError).font(.callout).foregroundStyle(.secondary)
+                HStack {
+                    Button("Retry lookup") { retry += 1 }
+                    SettingsLink { Text("Settings…") }
+                    Button("Create with reference only") { start(linkOnly: true) }
+                        .disabled(store.busy || folder.isEmpty)
+                }
+            } else if githubURL == nil && !reference.isEmpty { ProgressView().controlSize(.small) }
             if !store.error.isEmpty { Text(store.error).foregroundStyle(.red) }
             HStack {
                 Spacer()
                 Button("Cancel") { store.error = ""; dismiss() }.keyboardShortcut(.cancelAction)
                 if store.busy { ProgressView().controlSize(.small) }
-                Button(githubURL == nil ? "Create" : "Open workstream") {
-                    Task {
-                        let action = githubURL.map { ["github-open", $0, folder, provider] }
-                            ?? ["create", "", folder, reference, provider]
-                        if let id = await store.perform(action) {
-                            created(id, store.rows.first { $0.id == id }?.sourceFolder ?? folder)
-                            if action[0] == "create" {
-                                _ = await store.perform(["open", id])
-                            } else if let row = store.rows.first(where: { $0.id == id }), row.state != "Done",
-                               !row.live, let first = row.terminals.first {
-                                _ = await store.perform(["open", first.id])
-                            }
-                        }
-                    }
-                }.keyboardShortcut(.defaultAction).disabled(githubURL == nil && folder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button(primaryAction) { start() }.keyboardShortcut(.defaultAction)
+                    .disabled(githubURL == nil && ((!reference.isEmpty && validPreview == nil) ||
+                              (validPreview?.existing == nil && folder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
             }.disabled(store.busy)
         }.padding(24).frame(width: 450)
+    }
+
+    private func start(linkOnly: Bool = false) {
+        let args = githubURL.map { ["github-open", $0, folder, provider] } ?? (!linkOnly && validPreview != nil
+            ? ["linear-start", reference, folder, provider, validPreview?.existing ?? "", validPreview?.issue.id ?? "",
+               validPreview?.closed == true ? "1" : "0"]
+            : ["create", "", folder, reference, provider])
+        Task {
+            guard let id = await store.perform(args) else { retry += 1; return }
+            let row = store.rows.first { $0.id == id }
+            if row?.state == "Done" {
+                created(id, row?.sourceFolder ?? folder, nil)
+                return
+            }
+            let agents = row?.terminals.filter { $0.provider != "shell" } ?? []
+            let terminal = agents.first(where: \.live) ?? agents.first
+            var terminalID = terminal?.id ?? id
+            if row != nil && agents.isEmpty {
+                terminalID = await store.perform(["add-terminal", id, provider]) ?? id
+            } else if terminal?.live != true {
+                _ = await store.perform(["open", terminalID])
+            }
+            created(id, row?.sourceFolder ?? folder, terminalID)
+        }
     }
 }
 
