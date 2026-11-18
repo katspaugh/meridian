@@ -72,6 +72,4 @@ Meridian's source is available under the [MIT License](LICENSE).
 
 ### Talk to Meridian
 
-Meridian opens to a persistent conversation spanning your workstreams. Return to it with **Meridian** in the sidebar or **⇧⌘M**. Ask for a status summary, direct an idle agent, restart an offline terminal, or state a preference for Meridian to remember. **Overview** reveals the briefing, questions, and decision log. Pausing background follow-ups leaves direct chat requests available.
-
-This restores the conversational entry point toward a single place to manage work. Creating workstreams from natural language is still future work; use **New workstream** in the chat header today.
+Meridian opens an embedded Codex CLI terminal. Select **Meridian** or press **⇧⌘M** to return to the same session from any workstream. It uses your local Codex login and settings. Ask it to review your workstreams, create a workstream in a project folder, or send instructions to an idle agent. **Overview** contains the briefing, pending questions, decision log, and previous chat messages. The terminal stays running when you switch views or quit the app.

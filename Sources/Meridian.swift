@@ -570,7 +570,7 @@ struct Dashboard: View {
                     if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
                     if pane == .meridian {
                         ManagerView(store: manager, streams: store.rows, openStream: openFromOverview,
-                                    focusedTerminal: nil, newWorkstream: { adding = true })
+                                    appearance: appearance, newWorkstream: { adding = true })
                     } else if pane == .board {
                         SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true })
                     } else if let stream = selected {

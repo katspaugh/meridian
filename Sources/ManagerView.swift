@@ -15,7 +15,10 @@ struct ManagerView: View {
     @ObservedObject var store: ManagerStore
     let streams: [Stream]
     let openStream: (Stream) -> Void
-    let focusedTerminal: String?
+    let appearance: String?
+    @State private var socket: String?
+    @State private var terminalError: String?
+    @State private var launchID = UUID()
     let newWorkstream: () -> Void
     @State private var showingOverview = false
     @State private var pendingPause: Bool?
@@ -34,6 +37,16 @@ struct ManagerView: View {
                         briefing
                         if let asks = state?.asks, !asks.isEmpty { needsYou(asks) }
                         ForEach(state?.commentErrors ?? [], id: \.self) { Text($0).foregroundStyle(.red) }
+                        if let history = state?.chat, !history.isEmpty {
+                            DisclosureGroup("Previous chat") {
+                                ForEach(history) { message in
+                                    VStack(alignment: .leading) {
+                                        Text(message.role == "user" ? "You" : "Meridian").font(.caption.bold())
+                                        Text(message.text).textSelection(.enabled)
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
                         activity
                     }
                     .frame(maxWidth: 760, alignment: .leading).padding(16)
@@ -41,7 +54,7 @@ struct ManagerView: View {
                 }.frame(maxHeight: 280)
                 Divider()
             }
-            chat
+            terminal
 
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -51,7 +64,7 @@ struct ManagerView: View {
             guard let state, !state.paused, state.briefing.isEmpty
                     || (state.briefingStale && Date().timeIntervalSince1970 - (state.briefingTime ?? 0) > 600)
             else { return }
-            await store.sweep(excluding: focusedTerminal)
+            await store.sweep(excluding: nil)
         }
         .task(id: "\(showingOverview)-\(state?.events.map(\.id).max() ?? 0)") {
             guard showingOverview else { return }
@@ -76,7 +89,7 @@ struct ManagerView: View {
             Spacer()
             Button(showingOverview ? "Hide overview" : "Overview (\(state?.asks.count ?? 0))") { showingOverview.toggle() }
             Button("New workstream…", action: newWorkstream)
-            Button { Task { await store.sweep(excluding: focusedTerminal) } } label: {
+            Button { Task { await store.sweep(excluding: nil) } } label: {
                 if store.sweeping {
                     ProgressView().controlSize(.small)
                 } else {
@@ -199,84 +212,33 @@ struct ManagerView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var chat: some View {
-        let messages = state?.chat ?? []
-        return VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        if messages.isEmpty {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Talk to Meridian").font(.largeTitle.bold())
-                                Text("One conversation across your workstreams. Ask what needs attention, pass instructions to an idle agent, or tell me how you like to work.")
-                                    .foregroundStyle(.secondary)
-                                Button("What needs my attention?") { store.draft = "What needs my attention across my workstreams?" }
-                                Text("To start a new workstream, use New workstream above.").font(.caption).foregroundStyle(.secondary)
-                            }.padding(.vertical, 24)
-                        }
-                        ForEach(messages) { message in chatMessage(message).id(message.id) }
-                        if store.sending {
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.small)
-                                Text("Meridian is replying…").foregroundStyle(.secondary)
-                            }.id(-1)
-                        }
-                    }.frame(maxWidth: 800, alignment: .leading).padding(16)
-                        .frame(maxWidth: .infinity)
+    private var terminal: some View {
+        Group {
+            if let socket, let appearance {
+                StreamTerminal(streamID: "meridian-soul", appearance: appearance, socket: socket,
+                               isCodex: true, onDisconnect: {
+                    self.socket = nil
+                    terminalError = "The Meridian terminal disconnected."
+                })
+            } else if let terminalError {
+                VStack(spacing: 8) {
+                    Text(terminalError).textSelection(.enabled)
+                    Button("Reconnect to Codex") { launchID = UUID() }
                 }
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: messages.last?.id) { _, id in
-                    if let id { withAnimation { proxy.scrollTo(id, anchor: .bottom) } }
-                }
-                .onChange(of: store.sending) { _, sending in if sending { withAnimation { proxy.scrollTo(-1, anchor: .bottom) } } }
+            } else {
+                ProgressView("Opening Codex…")
             }
-            if let error = store.chatError {
-                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
-                    .textSelection(.enabled).padding(.horizontal, 16).padding(.vertical, 8)
-            }
-            Divider()
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Message Meridian", text: $store.draft, axis: .vertical)
-                    .lineLimit(1...5).textFieldStyle(.roundedBorder)
-                    .onSubmit(send)
-                    .accessibilityLabel("Message Meridian")
-                Button("Send", action: send)
-                    .disabled(store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .disabled(store.sending)
-            .padding(.horizontal, 16).padding(.vertical, 10)
-            .background(.bar)
         }
-    }
-
-    @ViewBuilder private func chatMessage(_ message: ManagerChatMessage) -> some View {
-        switch message.role {
-        case "user":
-            HStack {
-                Spacer(minLength: 48)
-                Text(message.text)
-                    .padding(.horizontal, 10).padding(.vertical, 7)
-                    .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: launchID) {
+            terminalError = nil
+            do {
+                let data = try await Bridge.run(["manager-terminal"])
+                guard !Task.isCancelled else { return }
+                socket = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                if !Task.isCancelled { terminalError = error.localizedDescription }
             }
-        case "error":
-            Label(message.text, systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.red).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-        default:
-            Markdown(message.text)
-                .markdownTextStyle { FontSize(13) }
-                .markdownImageProvider(.asset)
-                .markdownInlineImageProvider(.asset)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.trailing, 48)
         }
-    }
-
-    private func send() {
-        let text = store.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !store.sending, !text.isEmpty else { return }
-        Task { await store.send(text) }
     }
 }
