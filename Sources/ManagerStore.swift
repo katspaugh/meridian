@@ -9,6 +9,9 @@ struct ManagerState: Decodable { let paused, briefingStale, sweepDue: Bool; let 
 @MainActor final class ManagerStore: ObservableObject {
     @Published var state: ManagerState?
     @Published var sweeping = false
+    @Published var sending = false
+    @Published var draft = ""
+    @Published var chatError: String?
     private var refreshID = 0
 
     /// Returns whether a fresh state was loaded; on failure the previous state stays.
@@ -29,6 +32,27 @@ struct ManagerState: Decodable { let paused, briefingStale, sweepDue: Bool; let 
         _ = try? await Bridge.run(["manager-sweep"] + (terminal.map { [$0] } ?? []))
         await refresh()
     }
+
+    func send(_ text: String) async {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sending, !text.isEmpty else { return }
+        sending = true
+        chatError = nil
+        defer { sending = false }
+        do {
+            _ = try await Bridge.run(["manager-chat", text])
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { draft = "" }
+            if !(await refresh()) {
+                chatError = "Your message was sent, but the conversation could not refresh. Reopen Meridian to reload it."
+            }
+        } catch {
+            chatError = "Could not finish sending your message. Check the conversation before retrying. \(error.localizedDescription)"
+            await refresh()
+        }
+    }
+
+    func setPaused(_ paused: Bool) async { await run(["manager-pause", paused ? "1" : "0"]) }
+    func markSeen() async { await run(["manager-seen"]) }
 
     func dismiss(_ ask: ManagerAsk) async { await run(["manager-dismiss", String(ask.id)]) }
 

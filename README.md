@@ -69,3 +69,9 @@ Workstream data lives in `~/Library/Application Support/Muxteroid`, with managed
 [![Donate with PayPal](https://img.shields.io/badge/Donate_with_PayPal-003087?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=ivan.kalyaev%40gmail.com)
 
 Meridian's source is available under the [MIT License](LICENSE).
+
+### Talk to Meridian
+
+Meridian opens to a persistent conversation spanning your workstreams. Return to it with **Meridian** in the sidebar or **⇧⌘M**. Ask for a status summary, direct an idle agent, restart an offline terminal, or state a preference for Meridian to remember. **Overview** reveals the briefing, questions, and decision log. Pausing background follow-ups leaves direct chat requests available.
+
+This restores the conversational entry point toward a single place to manage work. Creating workstreams from natural language is still future work; use **New workstream** in the chat header today.

@@ -314,11 +314,10 @@ struct Dashboard: View {
     @ObservedObject var store: Store
     @ObservedObject var notifications: AttentionNotifications
     @ObservedObject var manager: ManagerStore
-    private enum Pane { case workstream, board }
+    private enum Pane { case workstream, board, meridian }
     @State private var expanded: Set<Inbox> = [.active]
     @State private var adding = false
-    @State private var showingCommentInbox = false
-    @State private var pane = Pane.workstream
+    @State private var pane = Pane.meridian
     @State private var selection: String?
     @State private var agentSelection: String?
     @AppStorage("selectedWorkstreamTerminals") private var terminalSelections = "{}"
@@ -519,6 +518,14 @@ struct Dashboard: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             List {
+                Button { pane = .meridian } label: {
+                    Label("Meridian", systemImage: "sparkle")
+                        .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(switching)
+                .badge(manager.state?.asks.count ?? 0)
+                .listRowBackground(pane == .meridian ? Color.accentColor.opacity(0.16) : Color.clear)
+                .keyboardShortcut("m", modifiers: [.command, .shift])
                 Button { pane = .board } label: {
                     Label("Sprint board", systemImage: "rectangle.split.3x1")
                         .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
@@ -526,14 +533,6 @@ struct Dashboard: View {
                 .buttonStyle(.plain).disabled(switching)
                 .listRowBackground(pane == .board ? Color.accentColor.opacity(0.16) : Color.clear)
                 .keyboardShortcut("b", modifiers: [.command, .shift])
-                Button { showingCommentInbox = true } label: {
-                    Label("Comment follow-ups", systemImage: "bubble.left.and.bubble.right")
-                        .badge(manager.state?.asks.filter { $0.stream.isEmpty }.count ?? 0)
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showingCommentInbox) {
-                    CommentInbox(store: manager) { showingCommentInbox = false; adding = true }
-                }
                 ForEach(Inbox.allCases, id: \.self) { box in
                     let streams = store.rows.filter(box.includes)
                     DisclosureGroup(isExpanded: Binding(
@@ -569,7 +568,10 @@ struct Dashboard: View {
             } detail: {
                 VStack(spacing: 0) {
                     if !store.loadError.isEmpty { Text(store.loadError).foregroundStyle(.red).padding(8) }
-                    if pane == .board {
+                    if pane == .meridian {
+                        ManagerView(store: manager, streams: store.rows, openStream: openFromOverview,
+                                    focusedTerminal: nil, newWorkstream: { adding = true })
+                    } else if pane == .board {
                         SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true })
                     } else if let stream = selected {
                         let terminal = selectedTerminal(stream)
@@ -636,7 +638,7 @@ struct Dashboard: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .navigationTitle(pane == .board ? "Sprint board" : (selected?.title ?? "Workstreams"))
+                .navigationTitle(pane == .meridian ? "Meridian" : pane == .board ? "Sprint board" : (selected?.title ?? "Workstreams"))
                 .toolbar {
                     Button { adding = true } label: { Label("New workstream", systemImage: "plus") }.keyboardShortcut("n")
                     Button { inspectorVisible.toggle() } label: {

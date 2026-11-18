@@ -54,7 +54,7 @@ SWEEP = ("# Trigger: sweep\nYou are looking over every workstream for what no ho
          "`summary` is one line for the boss's activity log.")
 CHAT = ("# Trigger: chat\nThe boss is writing to you. Answer in `reply`, conclusion first. When the boss asks you to "
         "tell an agent something or to restart a terminal, put it under `actions`. " + ACTIONS +
-        " Add any preference or standing instruction the boss states to `remember`.")
+        " Add any preference or standing instruction the boss states to `remember`. You cannot create workstreams through chat yet. When asked to create one, explain that the boss can use New workstream in the chat header; never claim to have created it.")
 SWEEP_PAUSED = "You are paused: return no actions."
 CHAT_ACTION = "The boss asked for this in chat."
 UNREACHABLE = "Meridian could not be reached. Check that Claude Code is signed in, then try again."
