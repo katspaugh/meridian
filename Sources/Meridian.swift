@@ -332,6 +332,7 @@ struct Dashboard: View {
     @State private var switching = false
     @State private var terminalFocus = UUID()
     @State private var expandedStreams: Set<String> = []
+    @State private var blockerDestination: String?
     @State private var appearance: String?
     @AppStorage("inspectorVisible") private var inspectorVisible = true
     @AppStorage("lastWorkstreamFolder") private var lastFolder = ""
@@ -373,41 +374,70 @@ struct Dashboard: View {
             }
         }.joined(separator: " + ")
         let summary = "\(stream.title) · \(agentName) · \(stream.displayState)"
-        return Button {
-            selectTerminal(stream, agent: nil)
-        } label: {
-            HStack {
-                ZStack(alignment: .leading) {
-                    ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
-                        AgentIcon(provider: provider)
-                            .mask {
-                                Rectangle()
-                                    .overlay {
-                                        if index > 0 {
-                                            // Clear the area behind the preceding icon without
-                                            // painting over the sidebar or selection background.
-                                            Circle()
-                                                .offset(x: 6)
-                                                .blendMode(.destinationOut)
+        return VStack(alignment: .leading, spacing: 2) {
+            Button {
+                selectTerminal(stream, agent: nil)
+            } label: {
+                HStack {
+                    ZStack(alignment: .leading) {
+                        ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
+                            AgentIcon(provider: provider)
+                                .mask {
+                                    Rectangle()
+                                        .overlay {
+                                            if index > 0 {
+                                                // Clear the area behind the preceding icon without
+                                                // painting over the sidebar or selection background.
+                                                Circle()
+                                                    .offset(x: 6)
+                                                    .blendMode(.destinationOut)
+                                            }
                                         }
-                                    }
-                                    .compositingGroup()
-                            }
-                            .offset(x: -CGFloat(index) * 6)
-                            .zIndex(-Double(index))
+                                        .compositingGroup()
+                                }
+                                .offset(x: -CGFloat(index) * 6)
+                                .zIndex(-Double(index))
+                        }
                     }
+                    .frame(width: 16, height: 16, alignment: .leading)
+                    Text(stream.title).lineLimit(2)
+                    Spacer(minLength: 0)
+                    Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
                 }
-                .frame(width: 16, height: 16, alignment: .leading)
-                Text(stream.title).lineLimit(2)
-                Spacer(minLength: 0)
-                Circle().fill(stateColor(stream.displayState)).frame(width: 7, height: 7)
+                .padding(.vertical, 3).contentShape(Rectangle())
             }
-            .padding(.vertical, 3).contentShape(Rectangle())
+            .buttonStyle(.plain).disabled(switching)
+            .accessibilityLabel(summary)
+            .help(summary)
+            if let cue = stream.nextCue {
+                Button { follow(cue, in: stream) } label: {
+                    Label {
+                        Text(cue.title).lineLimit(1)
+                    } icon: {
+                        Image(systemName: cue.symbol).foregroundStyle(cue.color)
+                    }
+                    .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.plain).disabled(switching)
+                .help(cue.help)
+                .accessibilityLabel(stream.title + ", " + cue.title)
+                .accessibilityHint(cue.help)
+            }
         }
-        .buttonStyle(.plain).disabled(switching)
         .listRowBackground(pane == .workstream && selection == stream.id && agentSelection == nil ? Color.accentColor.opacity(0.16) : Color.clear)
-        .accessibilityLabel(summary)
-        .help(summary)
+    }
+
+    private func follow(_ cue: WorkstreamCue, in stream: Stream) {
+        switch cue {
+        case let .input(terminal, agent):
+            rememberTerminal(terminal.id, in: stream)
+            if agent != nil { expandedStreams.insert(stream.id) }
+            selectTerminal(stream, agent: agent)
+        case .blocked, .complete:
+            inspectorVisible = true
+            if case .blocked = cue { blockerDestination = stream.id }
+            selectTerminal(stream, agent: nil)
+        }
     }
 
     @ViewBuilder private func streamBranch(_ stream: Stream) -> some View {
@@ -743,7 +773,7 @@ struct Dashboard: View {
 
     private func inspector(_ stream: Stream) -> some View {
         WorkstreamInspector(stream: stream,
-                            terminal: selectedTerminal(stream), busy: store.busy,
+                            terminal: selectedTerminal(stream), busy: store.busy, blockerDestination: $blockerDestination,
                             clearPipeline: { Task { _ = await store.perform(["pipeline-reset", stream.id]) } },
                             pulls: store.pulls, viewingParent: agentSelection == nil && !switching, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in
             let reopening = stream.state == "Done"

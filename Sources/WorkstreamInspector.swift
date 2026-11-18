@@ -5,12 +5,15 @@ struct WorkstreamInspector: View {
     let stream: Stream
     let terminal: WorkstreamTerminal?
     let busy: Bool
+    @Binding var blockerDestination: String?
     let clearPipeline: () -> Void
     let pulls: [String: PullRequest]
     let viewingParent: Bool
     let refreshPulls: ([URL]) async -> Void
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.openWindow) private var openWindow
     @State private var sharing = false
     @State private var issueError = ""
@@ -31,6 +34,16 @@ struct WorkstreamInspector: View {
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
+            content.onChange(of: blockerDestination, initial: true) { _, destination in
+                guard destination == stream.id else { return }
+                proxy.scrollTo("blocked", anchor: .top)
+                blockerDestination = nil
+            }
+        }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             if stream.pipeline != nil || !stream.documents.isEmpty || stream.primary != nil || stream.links.contains(where: { $0.kind == "linear" }) {
                 // With a Pipeline section the whole content scrolls, the Tasks header included.
@@ -81,23 +94,17 @@ struct WorkstreamInspector: View {
                     Text("\(stream.terminals.count) terminals · shared task list").font(.caption).foregroundStyle(.secondary)
                 }
                 if stream.primary == nil && !stream.reference.isEmpty { Text(stream.reference).font(.callout).textSelection(.enabled) }
-                Button(stream.state == "Done" ? "Reopen" : "Mark complete") {
-                    if stream.state != "Done" && !unfinishedTasks.isEmpty {
-                        confirmingCompletion = true
-                    } else {
-                        toggleCompletion(false)
+                completionButton
+                    .disabled(busy)
+                    .alert("Mark this workstream complete?", isPresented: $confirmingCompletion) {
+                        Button("Cancel", role: .cancel) { }
+                        Button("Mark complete") { toggleCompletion(true) }
+                    } message: {
+                        let count = unfinishedTasks.count
+                        let titles = unfinishedTasks.prefix(3).map(\.title).joined(separator: "\n")
+                        let remaining = count > 3 ? "\n…and \(count - 3) more" : ""
+                        Text("\(count) \(count == 1 ? "task will" : "tasks will") stay open in this workstream.\n\n\(titles)\(remaining)")
                     }
-                }
-                .disabled(busy)
-                .alert("Mark this workstream complete?", isPresented: $confirmingCompletion) {
-                    Button("Cancel", role: .cancel) { }
-                    Button("Mark complete") { toggleCompletion(true) }
-                } message: {
-                    let count = unfinishedTasks.count
-                    let titles = unfinishedTasks.prefix(3).map(\.title).joined(separator: "\n")
-                    let remaining = count > 3 ? "\n…and \(count - 3) more" : ""
-                    Text("\(count) \(count == 1 ? "task will" : "tasks will") stay open in this workstream.\n\n\(titles)\(remaining)")
-                }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.bar)
         }
@@ -111,6 +118,30 @@ struct WorkstreamInspector: View {
             while !Task.isCancelled {
                 await refreshPulls(changes.map(\.url))
                 do { try await Task.sleep(for: .seconds(60)) } catch { break }
+            }
+        }
+    }
+
+    @ViewBuilder private var completionButton: some View {
+        if case .complete = stream.nextCue {
+            Button { toggleCompletion(false) } label: {
+                Label {
+                    Text("Mark complete")
+                } icon: {
+                    Image(systemName: WorkstreamCue.complete.symbol)
+                        .symbolEffect(.breathe, isActive: !reduceMotion && !busy && controlActiveState == .key)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .help("All tasks are done. Mark this workstream complete.")
+            .accessibilityHint("All tasks are done.")
+        } else {
+            Button(stream.state == "Done" ? "Reopen" : "Mark complete") {
+                if stream.state != "Done" && !unfinishedTasks.isEmpty {
+                    confirmingCompletion = true
+                } else {
+                    toggleCompletion(false)
+                }
             }
         }
     }
@@ -227,7 +258,7 @@ struct WorkstreamInspector: View {
         VStack(alignment: .leading, spacing: 22) {
             if stream.tasks.isEmpty { Text("No tasks yet").foregroundStyle(.secondary) }
             ForEach(groups, id: \.self) { status in
-                taskGroup(status)
+                taskGroup(status).id(status)
             }
             if !changes.isEmpty {
                 Divider()
