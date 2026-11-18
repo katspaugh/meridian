@@ -189,11 +189,13 @@ def linear(rows, since):
     query = '''query($after: String, $since: DateTimeOrDuration!) {
       viewer { id }
       comments(first: 100, after: $after, includeArchived: true, filter: {updatedAt: {gte: $since}}) {
-        nodes { id body url updatedAt resolvedAt parent { resolvedAt } user { id name }
+        nodes { id body url updatedAt resolvedAt parent { id resolvedAt } user { id name }
           issue { url assignee { id } creator { id } } }
         pageInfo { hasNextPage endCursor }
       }
     }'''
+    # Explicitly posted workstream questions have their own reply delivery path.
+    threads = {thread["comment"] for row in rows for thread in row.get("linearQuestions") or [] if thread.get("comment")}
     found, after = [], None
     while True:
         data = linear_query(query, dict(after=after, since=since))
@@ -203,6 +205,8 @@ def linear(rows, since):
             target = issue.get('url', '')
             if (not target or user.get('id') == me or item.get('resolvedAt')
                     or (item.get('parent') or {}).get('resolvedAt') or not (item.get('body') or '').strip()):
+                continue
+            if (item.get("parent") or {}).get("id") in threads:
                 continue
             relevant = matching(rows, target) or any((issue.get(field) or {}).get('id') == me for field in ('assignee', 'creator'))
             if not relevant and me not in item['body']:

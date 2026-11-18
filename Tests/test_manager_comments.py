@@ -318,6 +318,16 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(all(r['target'] == 'https://github.com/o/r/pull/12' for r in result))
         self.assertTrue(all('/comments?' in p or '/reviews?' in p for p in paths[2:]))
 
+    def test_question_replies_use_only_the_workstream_thread_delivery(self):
+        issue = dict(url="https://linear.app/team/issue/ENG-1/title", assignee=dict(id="me"))
+        comment = dict(id="answer", body="Keep the old behavior", updatedAt="now", url="reply",
+                       user=dict(id="colleague"), issue=issue, parent=dict(id="question"))
+        another = dict(comment, id="unrelated", parent=dict(id="another-thread"))
+        page = dict(viewer=dict(id="me"), comments=dict(nodes=[comment, another], pageInfo=dict(hasNextPage=False)))
+        with patch.object(comments, "linear_query", return_value=page):
+            result = comments.linear([dict(linearQuestions=[dict(comment="question")])], "since")
+        self.assertEqual([r["id"] for r in result], ["linear:unrelated:now"])
+
     def test_linear_pages_and_filters_to_linked_or_personal_comments(self):
         def item(id, assignee='other', author='other'):
             return dict(id=id, body='Fix it', updatedAt='now', url='comment-url', user=dict(id=author, name=author),

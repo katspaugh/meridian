@@ -77,9 +77,9 @@ struct AppSettingsView: View {
                         Button("Remove key", role: .destructive) { removing = true }
                     }
                 }
-                Link("Create a read-access key in Linear", destination: URL(string: "https://linear.app/settings/api")!)
+                Link("Create a Linear API key", destination: URL(string: "https://linear.app/settings/api")!)
                     .font(.caption)
-                Text("Saved keys are never shown here or written to project files.")
+                Text("Use read access for issue context, comment creation to ask questions, and write access to share review attachments.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("GitHub") {

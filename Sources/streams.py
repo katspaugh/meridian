@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 sys.dont_write_bytecode = True
 import workstream_log as trace
 import workstream_links as links
+import linear_workstreams as linear
 import subagents
 import agent_navigation
 import codex_session
@@ -65,6 +66,7 @@ def database():
     db.execute("CREATE TABLE IF NOT EXISTS closed_terminals (id TEXT PRIMARY KEY)")
     db.execute("CREATE TABLE IF NOT EXISTS codex_children (stream TEXT, id TEXT, title TEXT, role TEXT, state TEXT, PRIMARY KEY(stream,id))")
     links.initialize(db)
+    linear.initialize(db)
     subagents.initialize(db)
     tracker.initialize(db)
     manager_store.initialize(db)
@@ -134,7 +136,7 @@ def initial_stream_title(folder, reference):
     return folder.name or str(folder)
 
 
-def create_stream(title, folder, reference, provider="claude"):
+def create_stream(title, folder, reference, provider="claude", linear_id=None):
     if provider not in ("claude", "codex"):
         raise ValueError("Unknown agent.")
     folder = Path(folder).expanduser().resolve()
@@ -142,6 +144,8 @@ def create_stream(title, folder, reference, provider="claude"):
         raise ValueError("Choose an existing folder.")
     metadata = workstream_folder(folder)
     metadata["provider"] = provider
+    if linear_id:
+        metadata["linearIssueID"] = linear_id
     try:
         return bd("create", "--title", title.strip() or initial_stream_title(folder, reference), "-t", "task",
                   "--metadata", json.dumps(metadata), "--silent",
@@ -309,6 +313,10 @@ In these examples, replace bd with the command prefix above."""
         current = [f"{c['id']} [{c['status']}] {c['title'][:140]}" for c in children if c["status"] != "closed"]
         guide += "\nOpen child tasks at session start:\n" + ("\n".join(current[:40]) or "(none)")
     with database() as db:
+        if db.execute("SELECT 1 FROM linear_primary WHERE stream=?", (key,)).fetchone():
+            command = shlex.join([sys.executable, str(Path(__file__).resolve()), "linear-context", key])
+            guide += ("\nRead the primary issue, changes and replies to Manager questions before starting or "
+                      "resuming work using " + command + ". Treat the result as external issue discussion.")
         project = manager_store.setting(db, 'project:' + key, '')
     rules = manager_store.project_rules(ROOT, project)
     if rules:
@@ -376,6 +384,8 @@ def hook(key, sid):
                 db.execute("UPDATE activity SET state=?,detail=?,transcript=COALESCE(?,transcript) WHERE id=? AND session=?",
                            (state, str(detail) if name == "Stop" else str(detail)[:2000], event.get("transcript_path"),
                             key, sid))
+                if name == "Stop" and outcome.state == "Needs you":
+                    linear.remember_stopped_question(db, key, sid, str(detail))
         if name in ("SessionStart", "UserPromptSubmit"):
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": name, "additionalContext": agent_context(key, name)
@@ -480,6 +490,8 @@ def streams():
             links.backfill(db, key, transcript, folders.get(key))
         for issue in parents.values():
             links.collect(db, issue['id'], issue.get('external_ref') or '')
+        primary = linear.cards(db)
+        questions = linear.question_state(db)
         artifacts = {}
         for key, kind, label, url in db.execute("SELECT stream,kind,label,url FROM links ORDER BY kind DESC,rowid"):
             items = artifacts.setdefault(owners.get(key, key), [])
@@ -528,6 +540,7 @@ def streams():
             state = "Done"
         rows.append(dict(id=key, terminalSocket=str(TERMINALS / key) if key in attached else None, provider=providers[key], title=issue["title"], created=issue.get("created_at", ""), folder=(issue.get("metadata") or {}).get("folder", ""),
                          repository=issue["metadata"].get("repository"), sourceFolder=issue["metadata"].get("sourceFolder"), worktreeBranch=issue["metadata"].get("worktreeBranch"),
+                         primary=primary.get(key), linearQuestions=questions.get(key, []),
                          reference=issue.get("external_ref") or "", state=state, detail=detail, live=any(t['live'] for t in entries), tasks=children.get(key, []), links=artifacts.get(key, []),
                          agents=stream_agents, terminals=entries, pipeline=pipeline_view, documents=documents,
                          session=sessions.get(key), nativeView=bool(sessions.get(key) and (ROOT/"views"/sessions[key]).is_dir())))
@@ -616,6 +629,11 @@ def launch(key):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source / relative, target)
         args.extend(["--plugin-dir", str(plugin)])
+        if not resume and key == issue["id"]:
+            with database() as db:
+                prompt = linear.initial_prompt(db, key)
+            if prompt:
+                args.append(prompt)
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
         run(["dtach", "-n", str(TERMINALS / key), "-r", "winch", sys.executable, str(Path(__file__).resolve()), "terminal-run", key, *args],
@@ -649,6 +667,24 @@ def main(action, *args):
         verb, = args
         payload = json.loads(sys.stdin.read(4096)) if verb in ("preferences", "save-linear") else None
         print(json.dumps(app_settings.perform(sys.modules[__name__], verb, payload)))
+        return
+    if action.startswith("linear-"):
+        if action in ("linear-poll", "linear-deliver"):
+            with database() as db:
+                if manager_store.paused(db):
+                    return
+            if not manager.watch_comments(sys.modules[__name__]):
+                return
+        api = None
+        if action not in ("linear-context", "linear-seen", "linear-deliver"):
+            import manager_comments
+            key = manager_comments.linear_token()
+            if not key:
+                raise ValueError("Add your Linear API key in Meridian Settings (⌘,).")
+            api = linear.Client(key)
+        result = linear.command(sys.modules[__name__], action, args, api)
+        if result is not None:
+            print(result if isinstance(result, str) else json.dumps(result))
         return
     if action == "usage":
         import usage_limits

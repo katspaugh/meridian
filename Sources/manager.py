@@ -310,6 +310,9 @@ def _context(bridge, key, event, trigger, stream, rows):
 def _stream_lines(row):
     lines = [f"Title: {row.get('title', '')}"]
     lines += [f"Link: {link.get('kind', '')} {link.get('label', '')} {link.get('url', '')}" for link in row.get("links") or []]
+    for thread in (row.get("linearQuestions") or [])[:8]:
+        if thread.get("reply"):
+            lines.append(f"Linear discussion: {thread['summary']} — {thread['reply'][:2000]}")
     for task in row.get("tasks") or []:
         lines.append(f"{task.get('id', '')} [{task.get('status', '')}] {task.get('title', '')}")
         if task.get("status") == "blocked":

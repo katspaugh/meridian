@@ -202,6 +202,7 @@ struct ManagerSlot: View {
         .popover(item: $detailAsk) { ask in
             VStack(alignment: .leading, spacing: 12) {
                 ManagerAskDetails(ask: ask)
+                LinearQuestionAction(stream: stream, ask: ask)
                 Button("Dismiss") { Task { await store.dismiss(ask); detailAsk = nil } }
             }.padding(16).frame(width: 340)
         }

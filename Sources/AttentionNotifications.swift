@@ -61,6 +61,18 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
         }
         Task {
             while !Task.isCancelled {
+                for stream in store.rows where stream.state != "Done" {
+                    for thread in stream.linearQuestions ?? [] where thread.reply == nil || thread.pending {
+                        let action = thread.reply == nil ? "linear-poll" : "linear-deliver"
+                        do { _ = try await Bridge.run([action, stream.id, String(thread.ask)]) }
+                        catch { log.error("Linear thread refresh failed: \(error.localizedDescription)") }
+                    }
+                }
+                try? await Task.sleep(for: .seconds(45))
+            }
+        }
+        Task {
+            while !Task.isCancelled {
                 await store.refresh()
                 if store.loadError.isEmpty {
                     await update(store.rows)
