@@ -166,24 +166,30 @@ struct WorkstreamInspector: View {
         }
         let related = stream.links.filter { $0.kind == "linear" && $0.label != stream.primary?.identifier }
         if !related.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Related issues").font(.headline)
+            Menu {
                 ForEach(related) { link in
-                    HStack {
-                        Link(link.label, destination: link.url)
-                        if stream.primary == nil && stream.reference.isEmpty {
-                            Button("Set as primary") {
+                    Link(link.label, destination: link.url)
+                }
+                if stream.primary == nil && stream.reference.isEmpty {
+                    Divider()
+                    Menu("Set primary issue") {
+                        ForEach(related) { link in
+                            Button(link.label) {
                                 Task {
                                     do {
                                         _ = try await Bridge.run(["linear-pin", stream.id, link.url.absoluteString])
                                         issueError = ""
                                     } catch { issueError = error.localizedDescription }
                                 }
-                            }.controlSize(.small)
+                            }
                         }
                     }
                 }
+            } label: {
+                Label("Related issues (\(related.count))", systemImage: "link")
             }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
         }
         let replies = (stream.linearQuestions ?? []).filter { $0.reply != nil }
         if !replies.isEmpty {
