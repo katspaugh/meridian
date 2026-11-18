@@ -355,7 +355,7 @@ struct Dashboard: View {
         var seen = Set<String>()
         return Array(candidates.compactMap { candidate -> String? in
             guard !candidate.isEmpty else { return nil }
-            let path = URL(fileURLWithPath: (candidate as NSString).expandingTildeInPath).standardizedFileURL.path
+            let path = URL(fileURLWithPath: (candidate as NSString).expandingTildeInPath).resolvingSymlinksInPath().standardizedFileURL.path
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
                   isDirectory.boolValue, seen.insert(path).inserted else { return nil }

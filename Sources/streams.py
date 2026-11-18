@@ -521,6 +521,13 @@ def streams():
         agents = {}
         parents = {i['id']: i for i in issues if not i.get('parent') and (i.get('metadata') or {}).get('folder')}
         for issue in parents.values():
+            # Saved worktrees still contain their original absolute paths. Expose
+            # the current spelling without changing Git's or Beads' records.
+            metadata = issue['metadata']
+            for field in ('folder', 'sourceFolder', 'worktreeRoot', 'repository'):
+                value = metadata.get(field)
+                if value and previous_root != ROOT and Path(value).is_relative_to(previous_root):
+                    metadata[field] = str(ROOT / Path(value).relative_to(previous_root))
             register_original(db, issue)
         registry = list(db.execute("SELECT id,stream,provider,title FROM workstream_terminals ORDER BY rowid"))
         closed = {row[0] for row in db.execute("SELECT id FROM closed_terminals")}
