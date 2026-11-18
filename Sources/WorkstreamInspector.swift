@@ -237,7 +237,8 @@ struct WorkstreamInspector: View {
                     Button("Share for review…") { sharing = true }
                 }
             }
-            if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
+            if let terminal, terminal.state != "Review", !terminal.detail.isEmpty,
+               terminal.detail != "Claude is continuing.", terminal.detail != "Claude is working on your request." {
                 Divider()
                 DisclosureGroup(isExpanded: $detailExpanded) {
                     Markdown(terminal.detail)
@@ -248,7 +249,7 @@ struct WorkstreamInspector: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 6)
                 } label: {
-                    Text(terminal.state == "Review" ? terminal.title + "’s reply" : "Activity").font(.headline)
+                    Text("Activity").font(.headline)
                 }
             }
         }
