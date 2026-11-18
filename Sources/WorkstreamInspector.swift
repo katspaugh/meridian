@@ -7,6 +7,7 @@ struct WorkstreamInspector: View {
     let terminal: WorkstreamTerminal?
     let busy: Bool
     let pulls: [String: PullRequest]
+    let viewingParent: Bool
     let refreshPulls: ([URL]) async -> Void
     let toggleCompletion: (_ keepTasksOpen: Bool) -> Void
 
@@ -52,7 +53,8 @@ struct WorkstreamInspector: View {
                     }
                     if !changes.isEmpty {
                         Divider()
-                        WorkstreamChanges(links: changes, pulls: pulls)
+                        WorkstreamChanges(links: changes, pulls: pulls, streamID: stream.id,
+                                          terminal: stream.state != "Done" && viewingParent ? terminal : nil)
                     }
                     if let terminal, !terminal.detail.isEmpty && terminal.detail != "Claude is continuing." && terminal.detail != "Claude is working on your request." {
                         Divider()

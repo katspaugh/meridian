@@ -145,6 +145,8 @@ enum Bridge {
         let pending = urls.map(\.absoluteString).filter { pulls[$0]?.state != "MERGED" }
         guard !pending.isEmpty, let data = try? await Bridge.run(["pulls"] + pending),
               let found = try? JSONDecoder().decode([String: PullRequest].self, from: data) else { return }
+        guard !Task.isCancelled else { return }
+        for url in pending where found[url] == nil { pulls.removeValue(forKey: url) }
         pulls.merge(found) { _, new in new }
     }
     func refresh(traced: Bool = false) async {
@@ -508,6 +510,23 @@ struct Dashboard: View {
         .navigationSplitViewColumnWidth(min: 175, ideal: 215, max: 320)
     }
 
+    private var board: some View {
+        let urls = Set(store.rows.flatMap { $0.links.filter { $0.kind == "pr" }.map(\.url) })
+            .sorted { $0.absoluteString < $1.absoluteString }
+        return SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true },
+                           pullAttention: { stream in
+            stream.links.flatMap { link in
+                (store.pulls[link.url.absoluteString]?.attention ?? []).map { link.label + " · " + $0 }
+            }
+        })
+        .task(id: urls) {
+            while !Task.isCancelled {
+                await store.refreshPulls(urls)
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+            }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             NavigationSplitView {
@@ -519,7 +538,7 @@ struct Dashboard: View {
                         ManagerView(store: manager, streams: store.rows, openStream: openFromOverview,
                                     focusedTerminal: selectedTerminalID)
                     } else if pane == .board {
-                        SprintBoard(streams: store.rows, openStream: openFromOverview, newStream: { adding = true })
+                        board
                     } else if let stream = selected {
                         let terminal = selectedTerminal(stream)
                         HSplitView {
@@ -574,7 +593,7 @@ struct Dashboard: View {
                                         Link(destination: item.url) {
                                             Label(item.label, systemImage: "circle.hexagongrid")
                                         }
-                                        .accessibilityLabel("Linear issue " + item.label)
+                                        .accessibilityLabel((item.kind == "github-issue" ? "GitHub issue " : "Linear issue ") + item.label)
                                         .help(item.url.absoluteString)
                                     }
                                 }.font(.callout).padding(.horizontal, 12).padding(.vertical, 7)
@@ -627,7 +646,8 @@ struct Dashboard: View {
                 pane = .workstream
                 selection = id
                 agentSelection = nil
-                expanded.insert(.active)
+                archivedAgent = nil
+                expanded.insert(store.rows.first { $0.id == id }?.state == "Done" ? .done : .active)
                 adding = false
             }
         }
@@ -663,7 +683,7 @@ struct Dashboard: View {
     private func inspector(_ stream: Stream) -> some View {
         WorkstreamInspector(stream: stream, asks: manager.state?.asks.filter { $0.stream == stream.id } ?? [],
                             terminal: selectedTerminal(stream), busy: store.busy,
-                            pulls: store.pulls, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in
+                            pulls: store.pulls, viewingParent: agentSelection == nil && !switching, refreshPulls: { await store.refreshPulls($0) }) { keepTasksOpen in
             let reopening = stream.state == "Done"
             let args = [reopening ? "reopen" : "close", stream.id] + (keepTasksOpen && !reopening ? ["--force"] : [])
             Task {
@@ -709,10 +729,16 @@ struct NewStream: View {
     var recentFolders: [String]
     var created: (String, String) -> Void
     @State private var reference = ""
+    private var githubURL: String? {
+        let value = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.range(of: #"(?i)^https?://github\.com/[\w.-]+/[\w.-]+/(pull|issues)/[1-9]\d*(?:[/?#].*)?$"#,
+                           options: .regularExpression) == nil ? nil : value
+    }
     @AppStorage("newStreamProvider") private var provider = "claude"
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New workstream").font(.title2.bold())
+            TextField("GitHub issue, pull request, or Linear reference (optional)", text: $reference)
             Picker("Agent", selection: $provider) {
                 Text("Claude Code").tag("claude")
                 Text("Codex CLI").tag("codex")
@@ -764,19 +790,26 @@ struct NewStream: View {
             }
             Text("Git repositories get a new branch and worktree shared by all terminals. Other folders are used directly.")
                 .font(.caption).foregroundStyle(.secondary)
-            TextField("Linear issue or URL (optional)", text: $reference)
             if !store.error.isEmpty { Text(store.error).foregroundStyle(.red) }
             HStack {
                 Spacer()
                 Button("Cancel") { store.error = ""; dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Create") {
+                if store.busy { ProgressView().controlSize(.small) }
+                Button(githubURL == nil ? "Create" : "Open workstream") {
                     Task {
-                        if let id = await store.perform(["create", "", folder, reference, provider]) {
+                        let action = githubURL.map { ["github-open", $0, folder, provider] }
+                            ?? ["create", "", folder, reference, provider]
+                        if let id = await store.perform(action) {
                             created(id, store.rows.first { $0.id == id }?.sourceFolder ?? folder)
-                            _ = await store.perform(["open", id])
+                            if action[0] == "create" {
+                                _ = await store.perform(["open", id])
+                            } else if let row = store.rows.first(where: { $0.id == id }), row.state != "Done",
+                               !row.live, let first = row.terminals.first {
+                                _ = await store.perform(["open", first.id])
+                            }
                         }
                     }
-                }.keyboardShortcut(.defaultAction).disabled(folder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.keyboardShortcut(.defaultAction).disabled(githubURL == nil && folder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.disabled(store.busy)
         }.padding(24).frame(width: 450)
     }

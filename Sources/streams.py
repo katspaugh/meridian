@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -13,6 +14,7 @@ import stat
 import sqlite3
 import struct
 import subprocess
+import tempfile
 import termios
 import time
 import sys
@@ -80,7 +82,7 @@ def bridge_lock():
 PROVIDERS = {"claude": "Claude", "codex": "Codex", "shell": "Terminal"}
 
 
-def workstream_folder(folder):
+def workstream_folder(folder, start_commit=None):
     """Allocate one checkout for the stream, independently of its agent provider."""
     metadata = {"folder": str(folder), "sourceFolder": str(folder)}
     probe = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"],
@@ -92,8 +94,10 @@ def workstream_folder(folder):
     repository = Path(probe.stdout.strip()).resolve()
     relative = folder.relative_to(repository)
     try:
-        commit = run(["git", "-C", str(repository), "rev-parse", "--verify", "HEAD^{commit}"])
+        commit = run(["git", "-C", str(repository), "rev-parse", "--verify", (start_commit or "HEAD") + "^{commit}"])
     except ValueError as error:
+        if start_commit:
+            raise ValueError("The pull request head changed during checkout. Try opening it again.") from error
         raise ValueError("The repository needs an initial commit before creating a workstream.") from error
     if relative != Path('.'):
         try:
@@ -112,27 +116,77 @@ def workstream_folder(folder):
     return metadata
 
 
-def create_stream(title, folder, reference, provider="claude"):
+def create_stream(title, folder, reference, provider="claude", *, start_commit=None, brief=None):
     if provider not in ("claude", "codex"):
         raise ValueError("Unknown agent.")
     folder = Path(folder).expanduser().resolve()
     if not folder.is_dir():
         raise ValueError("Choose an existing folder.")
-    metadata = workstream_folder(folder)
+    metadata = workstream_folder(folder, start_commit)
     metadata["provider"] = provider
     try:
         return bd("create", "--title", title.strip() or "Untitled workstream", "-t", "task",
                   "--metadata", json.dumps(metadata), "--silent",
+                  *(["--description", brief] if brief else []),
                   *(["--external-ref", reference.strip()] if reference.strip() else []))
     except Exception as error:
         if metadata.get("worktreeRoot"):
             try:
                 # Never force removal: preserve files if something changed during creation.
                 run(["git", "-C", str(folder), "worktree", "remove", metadata["worktreeRoot"]])
-                run(["git", "-C", str(folder), "branch", "-d", metadata["worktreeBranch"]])
+                if start_commit:
+                    # A PR can be unmerged. Delete only the ref that still points to the commit we created it at.
+                    run(["git", "-C", str(folder), "update-ref", "-d", "refs/heads/" + metadata["worktreeBranch"], start_commit])
+                else:
+                    run(["git", "-C", str(folder), "branch", "-d", metadata["worktreeBranch"]])
             except ValueError as cleanup:
                 raise ValueError(f"{error}\nWorktree cleanup needs attention: {metadata['worktreeRoot']}\n{cleanup}") from error
         raise
+
+
+def linked_stream(url):
+    matches = [row for row in streams()
+               if any((links.github_item(value) or '').casefold() == url.casefold()
+                      for value in [row['reference']] + [link['url'] for link in row['links']])]
+    if matches:
+        return min(matches, key=lambda row: row['state'] == 'Done')['id']
+
+
+def open_github_stream(url, folder, provider):
+    url = links.github_item(url)
+    if not url:
+        raise ValueError("Paste a GitHub pull request or issue URL.")
+    with bridge_lock():
+        existing = linked_stream(url)
+    if existing:
+        return existing
+    _, _, _, owner, repo, kind, number = url.split('/')
+    if not folder.strip():
+        raise ValueError(f"Choose a local checkout of {owner}/{repo} as the working directory.")
+    folder = Path(folder).expanduser().resolve()
+    remote = None
+    if folder.is_dir():
+        remotes = links.command_output(['git', 'remote'], folder).splitlines()
+        for candidate in sorted(remotes, key=lambda name: name != 'origin'):
+            if links.repository(folder, candidate).casefold() == f'{owner}/{repo}'.casefold():
+                remote = candidate
+                break
+    if not remote:
+        raise ValueError(f"Choose a local checkout of {owner}/{repo} as the working directory.")
+    is_pr = kind == 'pull'
+    fields = 'title,body,headRefOid' if is_pr else 'title,body'
+    item = json.loads(run(['gh', 'pr' if is_pr else 'issue', 'view', url, '--json', fields], timeout=30))
+    commit = None
+    if is_pr:
+        commit = item['headRefOid']
+        if not re.fullmatch(r'[a-fA-F0-9]{40,64}', commit):
+            raise ValueError('GitHub did not return a pull request head commit.')
+        # Fetch the base repository's pull ref, including for PRs from forks.
+        run(['git', '-C', str(folder), 'fetch', '--no-tags', '--no-write-fetch-head', '--', remote,
+             'refs/pull/' + number + '/head'], timeout=90)
+    brief = url + '\n\n' + (item.get('body') or '')
+    with bridge_lock():
+        return linked_stream(url) or create_stream(item['title'], folder, url, provider, start_commit=commit, brief=brief)
 
 
 def register_original(db, issue):
@@ -278,7 +332,7 @@ Record discoveries as children and link dependencies with bd dep add BLOCKED PRE
 When marking a task blocked, always record both the specific missing condition and the concrete next action in the same command: bd update CHILD -s blocked --set-metadata blocked_reason="What prevents progress" --set-metadata unblock_action="Exactly what the user should do, where to do it, and how to tell the agent it is ready" --append-notes "Reason and next action". The app displays these fields under Why it’s blocked and To unblock. Use plain language, not internal IDs or vague requests to resolve the blocker. If another task or external event must finish, name it and say whether the user needs to act or just wait. For example: blocked_reason="No workstream has two different live providers to verify the overlapping icons" and unblock_action="In this workstream, use + beside the terminal tabs to add Claude alongside Codex, then tell the agent to verify the sidebar".
 Refresh both fields whenever the blocker changes. When resuming, clear them with bd update CHILD -s in_progress --unset-metadata blocked_reason --unset-metadata unblock_action. Do not mark a task blocked merely because an optional check is pending if you can still make progress.
 Close finished children with bd close CHILD --reason "outcome and verification". Before handing back, reconcile the remaining tasks and leave enough notes to resume.
-When you open or change a PR (including pushing commits), or work with a Linear issue, register its canonical URL with the workstream by running {link_command} URL. Resolve the PR URL with gh pr view when needed.
+When you open or change a PR (including pushing commits), or work with a GitHub or Linear issue, register its canonical URL with the workstream by running {link_command} URL. Resolve the PR URL with gh pr view when needed.
 The user owns completion of the parent. Simple questions can be answered directly.
 In these examples, replace bd with the command prefix above."""
     if event == "SessionStart":
@@ -618,7 +672,6 @@ def main(action, *args):
     if action == "agent-archive":
         with database() as db:
             entries = subagents.messages(db, *args)
-        import tempfile
         with tempfile.TemporaryFile(mode="w+") as transcript:
             transcript.write("Saved subagent transcript · snapshot\n\n")
             for entry in entries:
@@ -634,10 +687,42 @@ def main(action, *args):
         # Network lookups stay outside bridge.lock so they never delay the list refresh.
         print(json.dumps(links.pull_details(args)))
         return
+    if action == "github-open":
+        print(open_github_stream(*args))
+        return
+    if action == "review-threads":
+        print(json.dumps(links.review_threads(*args)))
+        return
+    if action == "github-handoff":
+        stream, terminal, kind, pr, *details = args
+        issue, provider = terminal_issue(terminal)
+        if issue["id"] != stream or issue["status"] == "closed" or provider not in ("claude", "codex"):
+            raise ValueError("Select an agent in this open workstream.")
+        if kind == "check":
+            context = links.check_context(pr, *details)
+            request = "Investigate this failed check in the workstream."
+        elif kind == "thread":
+            location, comment, thread_url = details
+            context = '\n'.join((pr, location, thread_url, comment))
+            request = "Address the selected review comment in this workstream."
+        else:
+            raise ValueError("Unknown handoff.")
+        # Pass a short local filename through the PTY. Review bodies and CI logs can
+        # be large and must never become terminal input, even if the agent exits.
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="meridian-github-", suffix=".txt", delete=False) as file:
+            file.write(context)
+        try:
+            message = request + " Read the quoted GitHub reference material at " + shlex.quote(file.name)
+            if not manager.tell(sys.modules[__name__], terminal, message, user_initiated=True):
+                raise ValueError("Select a live, idle Claude or Codex terminal and retry the handoff.")
+        except Exception:
+            Path(file.name).unlink(missing_ok=True)
+            raise
+        return
     if action == "link":
         key, url = args
-        if not (links.PR.search(url) or links.LINEAR.search(url)):
-            raise ValueError("Use a GitHub PR or Linear issue URL.")
+        if not (links.github_item(url) or links.LINEAR.search(url)):
+            raise ValueError("Use a GitHub PR, GitHub issue, or Linear issue URL.")
         with database() as db:
             links.collect(db, key, url)
         return

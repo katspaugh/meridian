@@ -535,7 +535,9 @@ class WorktreeCreationTests(unittest.TestCase):
         if args[0] == 'create':
             metadata = json.loads(args[args.index('--metadata') + 1])
             key = 'mx-created-' + str(len(self.created))
-            self.created.append(dict(id=key, title='Test', status='open', metadata=metadata))
+            self.created.append(dict(id=key, title=args[args.index('--title') + 1], status='open', metadata=metadata,
+                                     external_ref=args[args.index('--external-ref') + 1] if '--external-ref' in args else '',
+                                     description=args[args.index('--description') + 1] if '--description' in args else ''))
             return key
         if args[0] == 'show':
             return json.dumps([next(i for i in self.created if i['id'] == args[1])])
@@ -568,6 +570,48 @@ class WorktreeCreationTests(unittest.TestCase):
         self.assertEqual(folder.name, 'app')
         self.assertEqual((folder / 'file.txt').read_text(), 'feature\n')
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=folder), self.git('rev-parse', 'HEAD', cwd=source))
+
+    def test_github_pr_starts_at_fetched_head_and_reuses_stream(self):
+        base = self.git('rev-parse', 'HEAD')
+        # A fork PR is accessible via the base repository's pull ref.
+        self.git('checkout', '-b', 'contribution')
+        (self.repo / 'app' / 'file.txt').write_text('review this\\n')
+        self.git('-c', 'commit.gpgsign=false', 'commit', '-am', 'PR commit')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/pull/7/head', head)
+        self.git('checkout', 'main')
+        self.git('remote', 'add', 'upstream', str(self.repo))
+        url = 'https://github.com/Example/Project/pull/7'
+        item = dict(title='Review the contribution', headRefOid=head, body='Check the new behavior')
+        run = streams.run
+        def fetch(args, **kwargs):
+            return json.dumps(item) if args[:2] == ['gh', 'pr'] else run(args, **kwargs)
+        with patch.object(streams.links, 'repository', return_value='example/project'), patch.object(streams, 'run', side_effect=fetch):
+            key = streams.open_github_stream(url + '/files', str(self.repo), 'codex')
+        with patch.object(streams, 'run', side_effect=AssertionError('Unexpected second checkout')):
+            self.assertEqual(streams.open_github_stream(url.lower() + '?tab=1', '/missing', 'claude'), key)
+        self.assertEqual(len(self.created), 1)
+        issue = self.created[0]
+        self.assertEqual(issue['title'], item['title'])
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=issue['metadata']['folder']), head)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), base)
+        self.assertEqual(issue['external_ref'], url)
+
+    def test_github_issue_brief_and_wrong_repository(self):
+        url = 'https://github.com/example/project/issues/9'
+        self.git('remote', 'add', 'origin', 'https://github.com/example/project.git')
+        with patch.object(streams.links, 'repository', return_value='wrong/repo'), self.assertRaisesRegex(ValueError, 'example/project'):
+            streams.open_github_stream(url, str(self.repo), 'claude')
+        self.assertEqual(self.created, [])
+        run = streams.run
+        def fetch(args, **kwargs):
+            return json.dumps(dict(title='Fix the toolbar', body='Reproduce with a narrow window.')) if args[:2] == ['gh', 'issue'] else run(args, **kwargs)
+        with patch.object(streams, 'run', side_effect=fetch):
+            key = streams.open_github_stream(url + '#issuecomment-1', str(self.repo), 'claude')
+        self.assertIn('Reproduce with a narrow window.', self.created[0]['description'])
+        self.assertEqual(self.created[0]['title'], 'Fix the toolbar')
+        self.assertEqual(streams.linked_stream(url), key)
+        self.assertEqual(streams.streams()[0]['links'], [dict(kind='github-issue', label='example/project#9', url=url)])
 
     def test_extra_terminals_reuse_the_created_worktree(self):
         key = streams.create_stream('Test', str(self.repo), '', 'codex')

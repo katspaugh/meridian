@@ -385,7 +385,7 @@ def clean(text):
     return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) != "Cc")
 
 
-def tell(bridge, terminal, text):
+def tell(bridge, terminal, text, *, user_initiated=False):
     text = clean(str(text))
     if not text.strip():
         return False  # Enter alone would submit whatever is already in the prompt.
@@ -398,7 +398,8 @@ def tell(bridge, terminal, text):
                             WHERE t.id=?""", (terminal,)).fetchone()
         if not row or row[0] not in ("claude", "codex") or row[1] not in TELLABLE:
             return False
-        store.note_tell(db, terminal, text)
+        if not user_initiated:
+            store.note_tell(db, terminal, text)
     path = str(bridge.TERMINALS / terminal)
     try:
         subprocess.run(["dtach", "-p", path], input=b"\x1b[200~" + text.encode() + b"\x1b[201~", check=True,

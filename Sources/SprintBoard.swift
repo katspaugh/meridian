@@ -4,6 +4,7 @@ struct SprintBoard: View {
     let streams: [Stream]
     let openStream: (Stream) -> Void
     let newStream: () -> Void
+    var pullAttention: (Stream) -> [String] = { _ in [] }
     @State private var query = ""
     @State private var includeCompleted = false
 
@@ -103,6 +104,10 @@ struct SprintBoard: View {
                     Text(stream.title).font(.headline).fixedSize(horizontal: false, vertical: true)
                     Label(stream.displayState, systemImage: "circle.fill")
                         .font(.caption).foregroundStyle(stateColor(stream.displayState))
+                    ForEach(pullAttention(stream), id: \.self) { reason in
+                        Label(reason, systemImage: "arrow.triangle.pull")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                     Text(URL(fileURLWithPath: stream.folder).lastPathComponent)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Text(stream.tasks.isEmpty ? "No tasks yet" : "\(stream.tasks.filter { $0.status == "closed" }.count) of \(stream.tasks.count) done")

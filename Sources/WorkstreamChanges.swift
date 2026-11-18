@@ -4,13 +4,32 @@ import AppKit
 /// GitHub's view of a linked pull request. Every field is optional so a partial
 /// reply still shows a row; without a reply the row is a plain link.
 struct PullRequest: Decodable {
-    let title, state: String?
+    let title, state, head: String?
+    let failures: [FailedCheck]?
+    let attention: [String]?
     let additions, deletions, checks, finished, failed: Int?
+}
+
+struct FailedCheck: Decodable {
+    let name: String
+    let url: URL?
+}
+
+private struct ReviewThread: Decodable, Identifiable {
+    let url: URL
+    let author: String?
+    let body, path: String
+    let line: Int?
+    let outdated: Bool
+    var id: URL { url }
+    var location: String { path + (line.map { ":\($0)" } ?? "") + (outdated ? " (outdated)" : "") }
 }
 
 struct WorkstreamChanges: View {
     let links: [WorkstreamLink]
     let pulls: [String: PullRequest]
+    let streamID: String
+    let terminal: WorkstreamTerminal?
 
     @State private var showingAll = false
     private let limit = 5
@@ -19,7 +38,7 @@ struct WorkstreamChanges: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Changes").font(.headline)
             ForEach(showingAll ? links : Array(links.prefix(limit))) { link in
-                PullRequestRow(link: link, pull: pulls[link.url.absoluteString])
+                PullRequestRow(link: link, pull: pulls[link.url.absoluteString], streamID: streamID, terminal: terminal)
             }
             if links.count > limit {
                 Button(showingAll ? "Show less" : "Show more") { showingAll.toggle() }
@@ -32,6 +51,88 @@ struct WorkstreamChanges: View {
 private struct PullRequestRow: View {
     let link: WorkstreamLink
     let pull: PullRequest?
+    let streamID: String
+    let terminal: WorkstreamTerminal?
+    @State private var threads = [ReviewThread]()
+    @State private var threadError = ""
+    @State private var sending = false
+    @State private var feedback = ""
+    @State private var loadAttempt = 0
+
+    private var canSend: Bool {
+        guard let terminal else { return false }
+        return terminal.terminalSocket != nil && terminal.provider != "shell"
+            && ["Ready", "Review"].contains(terminal.state) && !sending
+    }
+
+    private func handoff(_ kind: String, _ details: [String]) {
+        guard let terminal, canSend else { return }
+        sending = true
+        feedback = "Sending to " + terminal.title + "…"
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await Bridge.run(["github-handoff", streamID, terminal.id, kind, link.url.absoluteString] + details)
+                feedback = "Sent to " + terminal.title
+            } catch { feedback = error.localizedDescription }
+        }
+    }
+
+    private var isOpen: Bool { pull?.state == "OPEN" || pull?.state == "DRAFT" }
+
+    @ViewBuilder private var followUp: some View {
+        if let failures = pull?.failures, !failures.isEmpty {
+            DisclosureGroup(failures.count == 1 ? failures[0].name + " failed" : "\(failures.count) failed checks") {
+                ForEach(Array(failures.enumerated()), id: \.offset) { _, check in
+                    VStack(alignment: .leading, spacing: 4) {
+                        if failures.count > 1 { Text(check.name).fontWeight(.medium) }
+                        Link("Open failed job", destination: check.url ?? link.url.appendingPathComponent("checks"))
+                        Button("Investigate with agent") {
+                            handoff("check", [check.name, check.url?.absoluteString ?? "", pull?.head ?? "unknown"])
+                        }.disabled(!canSend)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 3)
+                }
+            }
+        }
+        if !threads.isEmpty && isOpen {
+            DisclosureGroup("\(threads.count) unresolved " + (threads.count == 1 ? "thread" : "threads")) {
+                ForEach(threads) { thread in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Link(thread.location, destination: thread.url)
+                        Text(thread.body).lineLimit(4).textSelection(.enabled)
+                        Button("Address with agent") {
+                            handoff("thread", [thread.location, (thread.author ?? "Reviewer") + "\n" + thread.body,
+                                               thread.url.absoluteString])
+                        }.disabled(!canSend)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 3)
+                }
+            }
+        }
+        if isOpen && !threadError.isEmpty {
+            Button("Retry loading review threads") { loadAttempt += 1 }.help(threadError)
+        }
+        if !feedback.isEmpty { Text(feedback).foregroundStyle(.secondary) }
+        else if (pull?.failures?.isEmpty == false || !threads.isEmpty) && !canSend {
+            Text("Select a live, idle agent to send work.").foregroundStyle(.secondary)
+        }
+    }
+
+    private func refreshThreads() async {
+        guard isOpen else { threads = []; threadError = ""; return }
+        while !Task.isCancelled {
+            do {
+                let data = try await Bridge.run(["review-threads", link.url.absoluteString])
+                guard !Task.isCancelled else { return }
+                threads = try JSONDecoder().decode([ReviewThread].self, from: data)
+                threadError = ""
+            } catch {
+                guard !Task.isCancelled else { return }
+                threads = []
+                threadError = error.localizedDescription
+            }
+            do { try await Task.sleep(for: .seconds(60)) } catch { return }
+        }
+    }
 
     private var title: String? {
         let title = pull?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -86,6 +187,14 @@ private struct PullRequestRow: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            row
+            followUp.font(.callout)
+        }
+        .task(id: "\(isOpen)-\(loadAttempt)") { await refreshThreads() }
+    }
+
+    private var row: some View {
         Button(action: open) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: status.icon).foregroundStyle(status.color).frame(width: 16)

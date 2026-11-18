@@ -3,6 +3,7 @@ import json
 import re
 import shlex
 import subprocess
+from urllib.parse import urlsplit
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -12,6 +13,19 @@ ISSUE = re.compile(r'\b[A-Z][A-Z0-9]{0,15}-[1-9]\d*\b')
 REPO = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
 MUTATIONS = {'create', 'edit', 'merge', 'close', 'reopen', 'ready', 'review', 'comment'}
 PASSED = {'SUCCESS', 'NEUTRAL', 'SKIPPED'}
+
+
+GITHUB_ITEM = re.compile(r'https?://github\.com/([\w.-]+)/([\w.-]+)/(pull|issues)/([1-9]\d*)(?:[/?#].*)?', re.I)
+
+
+def github_item(value):
+    match = GITHUB_ITEM.fullmatch(value.strip())
+    if not match:
+        return None
+    owner, repo, kind, number = match.groups()
+    if owner in ('.', '..') or repo in ('.', '..'):
+        return None
+    return f'https://github.com/{owner}/{repo}/{kind.lower()}/{number}'
 
 
 def initialize(db):
@@ -30,6 +44,12 @@ def collect(db, key, text, *, pulls=True, issues=True):
         for owner, repo, number in PR.findall(text):
             save(db, key, 'pr', f'{owner}/{repo}#{number}', f'https://github.com/{owner}/{repo}/pull/{number}')
     if issues:
+        item = github_item(text)
+        if item:
+            _, _, _, owner, repo, kind, number = item.split('/')
+            if kind == 'issues':
+                save(db, key, 'github-issue', f'{owner}/{repo}#{number}', item)
+            return
         for match in LINEAR.finditer(text):
             label = match['id'].upper()
             save(db, key, 'linear', label, match.group().split('?')[0])
@@ -52,15 +72,16 @@ def command_output(args, cwd, timeout=4):
         return ''
 
 
-def repository(folder):
-    remote = command_output(['git', 'remote', 'get-url', 'origin'], folder)
-    match = re.search(r'github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$', remote, re.I)
+def repository(folder, remote_name='origin'):
+    remote = command_output(['git', 'remote', 'get-url', '--', remote_name], folder)
+    match = re.fullmatch(r'(?:git@github\.com:|(?:https?|git|ssh)://(?:git@)?github\.com(?::\d+)?/)([\w.-]+/[\w.-]+?)(?:\.git)?/?', remote, re.I)
     return match[1] if match else ''
 
 
 def summarize(pull):
     """Reduce `gh pr view --json` output to what one row of the Changes list shows."""
     checks = pull.get('statusCheckRollup') or []
+    failures = []
     finished = failed = 0
     for check in checks:
         if check.get('__typename') == 'StatusContext':
@@ -70,12 +91,29 @@ def summarize(pull):
             result = check.get('conclusion')
             done = check.get('status') == 'COMPLETED'
         finished += done
-        failed += done and result not in PASSED
+        if done and result not in PASSED:
+            failed += 1
+            target = check.get('detailsUrl') or check.get('targetUrl') or ''
+            failures.append(dict(name=check.get('name') or check.get('context') or 'Unnamed check',
+                                 url=target if urlsplit(target).scheme in ('https', 'http') else None))
     state = pull.get('state')
     count = lambda value: value if type(value) is int else None
-    return dict(title=str(pull.get('title') or ''), state='DRAFT' if pull.get('isDraft') and state == 'OPEN' else state,
+    summary = dict(title=str(pull.get('title') or ''), state='DRAFT' if pull.get('isDraft') and state == 'OPEN' else state,
                 additions=count(pull.get('additions')), deletions=count(pull.get('deletions')),
                 checks=len(checks), finished=finished, failed=failed)
+    if failures:
+        summary['failures'] = failures
+    if pull.get('headRefOid'):
+        summary['head'] = pull['headRefOid']
+    if state == 'OPEN':
+        attention = []
+        if pull.get('reviewDecision') == 'CHANGES_REQUESTED':
+            attention.append('Changes requested')
+        if pull.get('mergeable') == 'CONFLICTING':
+            attention.append('Merge conflict')
+        if attention:
+            summary['attention'] = attention
+    return summary
 
 
 def pull_details(urls):
@@ -83,16 +121,78 @@ def pull_details(urls):
     urls = [url for url in dict.fromkeys(urls) if PR.fullmatch(url)]
 
     def fetch(url):
-        fields = 'title,state,isDraft,additions,deletions,statusCheckRollup'
+        fields = 'title,state,isDraft,additions,deletions,statusCheckRollup,headRefOid,reviewRequests,reviewDecision,mergeable'
         try:
-            return summarize(json.loads(command_output(['gh', 'pr', 'view', url, '--json', fields], '/', timeout=15)))
+            pull = json.loads(command_output(['gh', 'pr', 'view', url, '--json', fields], '/', timeout=15))
+            row = summarize(pull)
+            reviewers = [r['login'].casefold() for r in pull.get('reviewRequests', []) if r.get('login')]
+            return row, reviewers if pull.get('state') == 'OPEN' else []
         except (ValueError, AttributeError, TypeError):
             return None
 
     if not urls:
         return {}
     with ThreadPoolExecutor(max_workers=8) as pool:
-        return {url: found for url, found in zip(urls, pool.map(fetch, urls)) if found}
+        found = {url: value for url, value in zip(urls, pool.map(fetch, urls)) if value}
+    if any(reviewers for _, reviewers in found.values()):
+        viewer = command_output(['gh', 'api', '--hostname', 'github.com', 'user', '--jq', '.login'], '/', timeout=10).casefold()
+        for row, reviewers in found.values():
+            if viewer in reviewers:
+                row.setdefault('attention', []).insert(0, 'Review requested from you')
+    return {url: row for url, (row, _) in found.items()}
+
+
+def review_threads(url):
+    match = PR.fullmatch(url)
+    if not match:
+        raise ValueError("Choose a GitHub pull request.")
+    owner, repo, number = match.groups()
+    query = """query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
+      repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
+        reviewThreads(first:100,after:$endCursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes { isResolved isOutdated path line originalLine comments(first:1) {
+            nodes { body url author { login } }
+          } }
+        }
+      } }
+    }"""
+    output = command_output(['gh', 'api', '--hostname', 'github.com', 'graphql', '--paginate', '--slurp',
+                             '-f', 'query=' + query, '-f', 'owner=' + owner, '-f', 'repo=' + repo,
+                             '-F', 'number=' + number], '/', timeout=30)
+    if not output:
+        raise ValueError('Could not load review threads. Check GitHub CLI access and retry.')
+    threads = []
+    for page in json.loads(output):
+        for thread in page['data']['repository']['pullRequest']['reviewThreads']['nodes']:
+            comments = thread['comments']['nodes']
+            if thread['isResolved'] or not comments:
+                continue
+            comment = comments[0]
+            threads.append(dict(url=comment['url'], body=comment['body'], author=(comment['author'] or {}).get('login'),
+                                path=thread['path'], line=thread['line'] or thread['originalLine'],
+                                outdated=thread['isOutdated']))
+    return threads
+
+
+def check_context(pr, name, target, head):
+    match = PR.fullmatch(pr)
+    if not match:
+        raise ValueError('Choose a GitHub pull request.')
+    repo = '/'.join(match.groups()[:2])
+    context = [f'Pull request: {pr}', f'Check: {name}', f'PR head: {head}', f'Check URL: {target or pr + "/checks"}']
+    job = re.fullmatch(r'https://github\.com/' + re.escape(repo) + r'/(?:actions/runs/\d+/job|runs)/(\d+)(?:[?#].*)?', target, re.I)
+    if job:
+        job_id = job[1]
+        metadata = command_output(['gh', 'api', '--hostname', 'github.com', f'repos/{repo}/actions/jobs/{job_id}'], '/', timeout=15)
+        if metadata:
+            data = json.loads(metadata)
+            context.append('Job commit: ' + str(data.get('head_sha') or 'unknown'))
+            context.extend('Failed step: ' + step['name'] for step in data.get('steps', [])
+                           if step.get('conclusion') in ('failure', 'timed_out', 'cancelled'))
+        log = command_output(['gh', 'run', 'view', '--repo', 'github.com/' + repo, '--job', job_id, '--log-failed'], '/', timeout=40)
+        context.append('Failed-step log (last 12000 characters):\n' + log[-12000:] if log else 'Failed-step log unavailable.')
+    return '\n'.join(context)
 
 
 def tool_result(db, key, name, args, result, folder, live=False):
