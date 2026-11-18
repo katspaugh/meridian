@@ -14,6 +14,16 @@ COMMAND = "command:meridian-view"
 LEGACY_COMMAND = "command:muxteroid-view"
 
 
+def existing_view_alias():
+    # Register the old name only for installations with that saved keybinding.
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    try:
+        contents = (config / "keybindings.json").read_text()
+    except OSError:
+        return None
+    return LEGACY_COMMAND.removeprefix("command:") if LEGACY_COMMAND in contents else None
+
+
 def ensure_shortcut():
     config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     path = config / "keybindings.json"

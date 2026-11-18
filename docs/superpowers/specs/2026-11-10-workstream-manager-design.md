@@ -4,7 +4,7 @@ Date: 2026-11-10. Status: approved and built. Updated after the build to match w
 
 ## Why
 
-Agents in Muxteroid stop and wait for the user far more often than they need to. Three cases the user named:
+Agents in Meridian stop and wait for the user far more often than they need to. Three cases the user named:
 
 - An agent marks a task blocked, and the blocker turns out to be a small decision.
 - An agent waits for information it could have looked up.
@@ -72,7 +72,7 @@ Verified by test call: `claude -p --safe-mode --model fable --effort high --outp
 
 ### Triggers for Claude sessions (through hooks)
 
-These run inside the hook that Claude Code already calls, so they work even when Muxteroid is closed.
+These run inside the hook that Claude Code already calls, so they work even when Meridian is closed.
 
 | What happens | Hook | What the manager can return |
 |---|---|---|
@@ -96,7 +96,7 @@ If the `PreToolUse` allow does not take effect, there is a second route that use
 
 Whether to step in is the manager's judgment, not an app rule (builder's call, following the user's wish for a less prescriptive manager). Each consult is told who prompted the agent last and how long ago, and the role prompt says: if the boss is in a conversation with this agent, an answered question is a finished turn, and a question the agent asks is theirs to answer.
 
-One app rule does apply. A sweep never types into the terminal the user currently has selected while Muxteroid is frontmost, so a manager message cannot land in a prompt the user is halfway through writing. The app reports the selected terminal to the bridge, and the sweep checks it again immediately before typing. Messages the user asks for in chat are typed regardless.
+One app rule does apply. A sweep never types into the terminal the user currently has selected while Meridian is frontmost, so a manager message cannot land in a prompt the user is halfway through writing. The app reports the selected terminal to the bridge, and the sweep checks it again immediately before typing. Messages the user asks for in chat are typed regardless.
 
 ### Triggers that need the app open
 
@@ -124,7 +124,7 @@ In a workstream's inspector, an open question from the manager appears above the
 
 ### Memory
 
-The manager keeps a notes file (`manager/notes.md` in Muxteroid's data folder): the user's preferences and standing instructions. It adds a note when the user states a preference in chat. The user can edit the file. Notes are included in every consult.
+The manager keeps a notes file (`manager/notes.md` in Meridian's data folder): the user's preferences and standing instructions. It adds a note when the user states a preference in chat. The user can edit the file. Notes are included in every consult.
 
 ## Limits built into the app, not left to judgment
 

@@ -42,7 +42,7 @@ def claude_windows(values):
 
 
 def claude_live():
-    request = {"type": "control_request", "request_id": "muxteroid-usage",
+    request = {"type": "control_request", "request_id": "meridian-usage",
                "request": {"subtype": "get_usage", "skip_behaviors": True}}
     proc = subprocess.run(
         ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -139,7 +139,7 @@ def codex():
                             raise ValueError("No account limits available")
                         return reply["result"]
                 raise EOFError()
-            request(1,"initialize",{"clientInfo":{"name":"muxteroid_usage","version":"1"}})
+            request(1,"initialize",{"clientInfo":{"name":"meridian_usage","version":"1"}})
             proc.stdin.write('{"method":"initialized"}\n')
             result = request(2,"account/rateLimits/read",{})
         finally:

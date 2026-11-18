@@ -1,7 +1,7 @@
 """Manual check of the manager against the real Claude Code: python3 Tests/manager_live.py
 
 Not a unit test, and not run by `unittest discover`: it calls the real `claude` once per trigger, on your own
-login, in a temporary MUXTEROID_HOME. Every event is read-only in nature; nothing asks for anything to be
+login, in a temporary MERIDIAN_HOME. Every event is read-only in nature; nothing asks for anything to be
 deleted, moved, installed or sent. Approvals and answers are only printed: no agent runs.
 """
 import contextlib
@@ -84,13 +84,13 @@ def events(folder):
 def main():
     with tempfile.TemporaryDirectory() as home:
         root = Path(home).resolve()
-        os.environ["MUXTEROID_HOME"] = str(root)
+        os.environ["MERIDIAN_HOME"] = str(root)
         folder = root / "project"
         folder.mkdir()
         (folder / "CHANGELOG.md").write_text("# Changelog\n\n## 1.2.0\n\n- Added PDF export.\n", encoding="utf-8")
         (folder / "README.md").write_text("# Exporter\n\nExports reports as PDF and CSV.\n", encoding="utf-8")
         bridge = Bridge(root, folder)
-        print(f"MUXTEROID_HOME={root}")
+        print(f"MERIDIAN_HOME={root}")
         for trigger, item in events(folder):
             start = time.monotonic()
             try:

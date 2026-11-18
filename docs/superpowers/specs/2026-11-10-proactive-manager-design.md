@@ -16,7 +16,7 @@ Their concrete pain was not knowing what is going on. They opened a workstream a
 - **Bite-sized only. No walls of text.** This is the most important rule in this document.
 - **When it speaks:** at turn ends only, using the review the manager already runs when an agent stops, plus a few cheap extras. No extra consults while agents work.
 - **Where it speaks:** a fixed slot at the bottom of the inspector (the right-hand Tasks pane), with action buttons. The owner chose this over a floating card and a title-bar line because it never shifts or covers content. Messages the owner has not acted on also collect under **Manager** in the left sidebar.
-- **Learning:** the manager notices instructions the owner repeats in a project and offers to make them standing rules. The owner's example is the definition of done for Muxteroid: push to main, rebuild the app, reinstall it, and relaunch it if needed. The owner keeps asking for this at the end of every task.
+- **Learning:** the manager notices instructions the owner repeats in a project and offers to make them standing rules. The owner's example is the definition of done for Meridian: push to main, rebuild the app, reinstall it, and relaunch it if needed. The owner keeps asking for this at the end of every task.
 - **Planned steps:** agents write their planned steps into Beads before they start, and the manager asks once if an agent has been working with nothing planned. (The owner first asked to show Claude's own to-do list in the Tasks pane. That list turned out to be unused: across 90 Claude sessions in three days, the built-in to-do tool was called zero times, because agents are told to track their steps in Beads.)
 - **Not now:** the manager rearranging the interface itself, such as reordering the sidebar or choosing which stream to open. Maybe later.
 
@@ -80,7 +80,7 @@ Codex terminals have no hooks. If the app's existing Codex connection already re
 
 ### Manager in the sidebar
 
-The **Manager** entry's badge today counts open questions. It now counts unread open questions, reminders, next messages, and rule proposals. Status lines never count, so the badge does not sit at the number of active workstreams. A message is read once it has been shown in the slot while Muxteroid is the active app, or once the owner acts on it. (Call.) The Manager view gains a list of every current message across workstreams, newest first, with the same buttons. This is where reminders wait if the owner never opens the stream.
+The **Manager** entry's badge today counts open questions. It now counts unread open questions, reminders, next messages, and rule proposals. Status lines never count, so the badge does not sit at the number of active workstreams. A message is read once it has been shown in the slot while Meridian is the active app, or once the owner acts on it. (Call.) The Manager view gains a list of every current message across workstreams, newest first, with the same buttons. This is where reminders wait if the owner never opens the stream.
 
 ## What the manager says, and when
 
@@ -106,7 +106,7 @@ When it speaks:
 
 - **When an agent ends a turn**, through the Stop review.
 - **When something hooks cannot see changes**, through the existing sweep trigger.
-- **When the owner comes back.** If Muxteroid becomes the active app after 30 minutes or more away, it runs one sweep so the lines are fresh. (Call.)
+- **When the owner comes back.** If Meridian becomes the active app after 30 minutes or more away, it runs one sweep so the lines are fresh. (Call.)
 - **Hourly.** Reminders depend on how long something has waited, which no event reports. While the app is open and any workstream is not Done, a sweep runs at least once an hour, whether or not the change check fired. (Call.)
 
 **When a linked PR's checks finish.** The app already polls linked PRs every 60 seconds while a workstream is on screen. When every check on a linked PR has passed, the app itself writes a next message, "PR #123 checks passed. Merge it?" with **Merge** and **Open**, without a consult. Otherwise an agent that pushed and stopped while checks were pending would hear nothing until the next sweep. (Call.)
@@ -125,7 +125,7 @@ A button does one of these:
 - **Save** / **No:** for a proposed rule (below).
 - **Details:** opens the Manager view at this message, for open questions whose full text does not fit.
 
-Open questions in the slot show a one-line form: the decision, cut to 100 characters, with **Open** (selects the terminal) and **Details**. Their options and recommendation stay in the Manager view and are not buttons. The terminal behind a question usually has a dialog on screen, and typing into it is unsafe. Muxteroid has no answer flow today and this design does not add one. (Call.)
+Open questions in the slot show a one-line form: the decision, cut to 100 characters, with **Open** (selects the terminal) and **Details**. Their options and recommendation stay in the Manager view and are not buttons. The terminal behind a question usually has a dialog on screen, and typing into it is unsafe. Meridian has no answer flow today and this design does not add one. (Call.)
 
 The manager chooses buttons from this list only. Every button press goes into the activity log.
 
@@ -137,7 +137,7 @@ On each prompt the owner sends to an agent, the app records the prompt's text (f
 
 The sweep's context includes the owner's last 30 prompts for each project with an active stream. When the manager sees the same kind of instruction two or three times, it proposes a rule as a message in the slot:
 
-> You always finish with push → rebuild → reinstall. Make that "done" for Muxteroid? **[Save] [No]**
+> You always finish with push → rebuild → reinstall. Make that "done" for Meridian? **[Save] [No]**
 
 A proposal carries two texts: the one-line message, and the full rule as it would be written, a few lines at most. **Save** does not save straight away. It opens a small popover beside the slot showing the full rule, with **Save** and **Cancel**. Only text the owner has seen is written. This is the one place the slot opens more than a line, because the rule goes to every agent in the project and can include pushing to main. (Call.)
 
@@ -151,14 +151,14 @@ Saved rules live in one Markdown file per project in the manager's folder, `mana
 
 ### Following rules
 
-- **Agents are told.** The context Muxteroid already gives every Claude session at start and on each prompt includes the project's rules: "In this project, done means: …".
+- **Agents are told.** The context Meridian already gives every Claude session at start and on each prompt includes the project's rules: "In this project, done means: …".
 - **The manager checks.** When an agent ends its turn and says it is finished, the Stop review gets the project's rules. If a step is missing, the manager sends the agent back to do it, inside the existing limit of three in a row.
 
 Rules can include pushing to main. That is safe only because the owner wrote or saved the rule. The manager never proposes a rule that the owner has not asked for at least twice in their own words.
 
 ## Planned steps
 
-- **Instruction.** The instructions Muxteroid gives every agent already say to create Beads steps for implementation work. They change to say: write your planned steps as Beads tasks before your first edit, and keep them current.
+- **Instruction.** The instructions Meridian gives every agent already say to create Beads steps for implementation work. They change to say: write your planned steps as Beads tasks before your first edit, and keep them current.
 - **One reminder.** If a Claude terminal has been working for more than 5 minutes and its stream has at most one unfinished task, the app adds one line to what Claude sees after its next tool: "Write your planned steps as Beads tasks so the owner can see them." This uses the extra context that the after-tool hook can return to Claude. It happens at most once per terminal per prompt from the owner. This is an app rule, not a manager consult, so it costs nothing. (Call: 5 minutes and "at most one".)
 
 The builder must check that the after-tool hook's extra context reaches Claude in the current Claude Code version before relying on it. If it does not, the reminder moves to the Stop review instead.

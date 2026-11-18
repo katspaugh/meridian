@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Show a Superpowers run as a timeline in the workstream inspector, with links that open the workstream's specs and plans in a Muxteroid window.
+**Goal:** Show a Superpowers run as a timeline in the workstream inspector, with links that open the workstream's specs and plans in a Meridian window.
 
 **Architecture:** The Python bridge owns the run. `pipeline.py` is a pure model ported from the reference mod; `pipeline_tracker.py` stores one run per workstream in `activity.sqlite`, feeds it from the existing Claude `PostToolUse` hook, from Codex turn commands and from files, and adds a `pipeline` object and a `documents` list to every stream in `list`. SwiftUI only decodes, formats and lays out.
 
@@ -24,7 +24,7 @@
 - All times cross the bridge as epoch seconds (floats). The app formats them.
 - Every new `.py` file is added to the `cp` line in `build.sh` and the `exclude` list in `Package.swift`.
 - Run the Python suite with `/usr/bin/python3 -m unittest discover -s Tests`. It must stay green after every task (35 tests pass today, 3 skipped).
-- Never run the built app or the bridge against the live data directory. Manual checks set `MUXTEROID_HOME` to a scratch directory.
+- Never run the built app or the bridge against the live data directory. Manual checks set `MERIDIAN_HOME` to a scratch directory.
 - End every commit message with the trailer `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>` (the `git commit -m` lines in the tasks show the subject only).
 
 ## Hook payloads
@@ -42,7 +42,7 @@ Captured from Claude Code's `PostToolUse` command hook on 2026-11-10. Every even
 
 ## Review Focus
 
-1. **Paths with spaces.** Every Muxteroid worktree lives under `~/Library/Application Support/`, so the `sdd-workspace` output and a quoted plan path contain a space. The mod's `\S*` patterns would cut the path. Expected: the full path is recorded. Test in Task 2.
+1. **Paths with spaces.** Every Meridian worktree lives under `~/Library/Application Support/`, so the `sdd-workspace` output and a quoted plan path contain a space. The mod's `\S*` patterns would cut the path. Expected: the full path is recorded. Test in Task 2.
 2. **A file that vanishes or cannot be read** between the event and the read (a plan deleted, a directory named `x.md`, invalid UTF-8). Expected: the event or the scan is skipped quietly; `list` still answers. Tests in Tasks 4 and 5.
 3. **A stored run that cannot be decoded** (hand-edited, or written by a later version). Expected: treated as no run, and the next event replaces it. Test in Task 4.
 4. **A hook payload whose `tool_response` is a plain string or missing** rather than an object with `stdout`. Expected: handled the same. Test in Task 4.
@@ -58,7 +58,7 @@ Captured from Claude Code's `PostToolUse` command hook on 2026-11-10. Every even
 | `Sources/codex_session.py` | Feed root-thread commands to the tracker. |
 | `Sources/PipelineView.swift` (new) | Decodable types, text formatting, `PipelineSection`. |
 | `Sources/DocumentWindow.swift` (new) | Rendered Markdown window for one file. |
-| `Sources/WorkstreamInspector.swift`, `Sources/Muxteroid.swift`, `Sources/AttentionNotifications.swift` | Place the section, decode the new fields, add the window scene, poll once a minute. |
+| `Sources/WorkstreamInspector.swift`, `Sources/Meridian.swift`, `Sources/AttentionNotifications.swift` | Place the section, decode the new fields, add the window scene, poll once a minute. |
 | `Tests/test_pipeline_model.py`, `Tests/test_pipeline_tracker.py` (new) | Unit tests. |
 | `build.sh`, `Package.swift`, `README.md` | Bundle the new files; document the feature. |
 
@@ -258,7 +258,7 @@ def test_new_documents_start_runs_and_old_ones_do_not(self):
     self.assertEqual(merged['phases']['merge']['status'], 'done')
 
 def test_workspace_and_brief_paths_may_contain_spaces(self):
-    path = '/Users/a/Library/Application Support/Muxteroid/worktrees/abc/.superpowers/sdd/2026-10-09-pipeline-pane'
+    path = '/Users/a/Library/Application Support/Meridian/worktrees/abc/.superpowers/sdd/2026-10-09-pipeline-pane'
     self.assertEqual(pipeline.workspace_path('bash scripts/sdd-workspace docs/p.md', 'note\n' + path + '\n'), path)
     self.assertIsNone(pipeline.workspace_path('ls', path))
     self.assertIsNone(pipeline.workspace_path('sdd-workspace x', 'no such plan file: x'))
@@ -465,7 +465,7 @@ git commit -m "Schedule and render a Superpowers run"
 
 - [ ] **Step 1: Write the failing tests** in `Tests/test_pipeline_tracker.py`
 
-Import `streams` under a temporary `MUXTEROID_HOME` exactly as `Tests/test_workstream_terminals.py:13-16` does, then `import pipeline, pipeline_tracker as tracker`. Class `TrackerTests` with this fixture:
+Import `streams` under a temporary `MERIDIAN_HOME` exactly as `Tests/test_workstream_terminals.py:13-16` does, then `import pipeline, pipeline_tracker as tracker`. Class `TrackerTests` with this fixture:
 
 ```python
 def setUp(self):
@@ -918,7 +918,7 @@ git commit -m "Poll pull requests and follow Codex commands for the pipeline"
 
 **Files:**
 - Create: `Sources/PipelineView.swift`
-- Modify: `Sources/Muxteroid.swift:44-54` (`Stream`), `:608-618` (`inspector`)
+- Modify: `Sources/Meridian.swift:44-54` (`Stream`), `:608-618` (`inspector`)
 - Modify: `Sources/WorkstreamInspector.swift:4-64`
 - Modify: `Sources/AttentionNotifications.swift:33-39`
 
@@ -1010,7 +1010,7 @@ Expected: `Build complete!` with no new warnings from the files touched.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Sources/PipelineView.swift Sources/Muxteroid.swift Sources/WorkstreamInspector.swift Sources/AttentionNotifications.swift
+git add Sources/PipelineView.swift Sources/Meridian.swift Sources/WorkstreamInspector.swift Sources/AttentionNotifications.swift
 git commit -m "Show the Superpowers pipeline in the inspector"
 ```
 
@@ -1020,7 +1020,7 @@ git commit -m "Show the Superpowers pipeline in the inspector"
 
 **Files:**
 - Create: `Sources/DocumentWindow.swift`
-- Modify: `Sources/Muxteroid.swift:692-704` (`MuxteroidApp`), `Sources/WorkstreamInspector.swift` (pass `open`)
+- Modify: `Sources/Meridian.swift:692-704` (`MeridianApp`), `Sources/WorkstreamInspector.swift` (pass `open`)
 - Modify: `README.md` ("Working across streams")
 
 **Interfaces:**
@@ -1037,31 +1037,31 @@ git commit -m "Show the Superpowers pipeline in the inspector"
 
 - [ ] **Step 2: Add the scene and open documents**
 
-In `MuxteroidApp.body`, after the dashboard `Window`: `WindowGroup("Document", id: "document", for: URL.self) { $url in if let url { DocumentWindow(url: url) } }.defaultSize(width: 760, height: 820).commandsRemoved()`. In `WorkstreamInspector`, read `@Environment(\.openWindow)` and pass `open: { openWindow(id: "document", value: URL(fileURLWithPath: $0.path)) }` to `PipelineSection`.
+In `MeridianApp.body`, after the dashboard `Window`: `WindowGroup("Document", id: "document", for: URL.self) { $url in if let url { DocumentWindow(url: url) } }.defaultSize(width: 760, height: 820).commandsRemoved()`. In `WorkstreamInspector`, read `@Environment(\.openWindow)` and pass `open: { openWindow(id: "document", value: URL(fileURLWithPath: $0.path)) }` to `PipelineSection`.
 
 - [ ] **Step 3: Document it in the README**
 
 Add this bullet to "Working across streams", after "Follow the plan.":
 
 ```markdown
-- **Follow a Superpowers run.** If you use the [Superpowers](https://github.com/obra/superpowers) plugin, the inspector shows the run above the tasks: brainstorm, plan, each plan task with its implement and review steps, final review, verify, PR, CI, and merge, with the time each finished and an estimate for what is left. The step that is waiting on you is marked. Below the timeline are the specs and plans written in this workstream; click one to read it in its own window, or open it in your editor from there. Muxteroid uses the Superpowers installation you already have. Claude terminals report each step as it happens; Codex terminals are followed through the spec, plan, and task-progress files, so their timeline updates at the end of a turn. PR checks are read with `gh` about once a minute. Right-click **Pipeline** and choose **Clear Pipeline** to forget a run; marking the workstream complete freezes it.
+- **Follow a Superpowers run.** If you use the [Superpowers](https://github.com/obra/superpowers) plugin, the inspector shows the run above the tasks: brainstorm, plan, each plan task with its implement and review steps, final review, verify, PR, CI, and merge, with the time each finished and an estimate for what is left. The step that is waiting on you is marked. Below the timeline are the specs and plans written in this workstream; click one to read it in its own window, or open it in your editor from there. Meridian uses the Superpowers installation you already have. Claude terminals report each step as it happens; Codex terminals are followed through the spec, plan, and task-progress files, so their timeline updates at the end of a turn. PR checks are read with `gh` about once a minute. Right-click **Pipeline** and choose **Clear Pipeline** to forget a run; marking the workstream complete freezes it.
 ```
 
-In "How it runs", after the sentence that ends "…for reporting activity.", add: `The same hooks drive the Superpowers timeline, which Muxteroid stores per workstream beside its other activity data.`
+In "How it runs", after the sentence that ends "…for reporting activity.", add: `The same hooks drive the Superpowers timeline, which Meridian stores per workstream beside its other activity data.`
 
 - [ ] **Step 4: Build the app**
 
-Run: `./build.sh 2>&1 | tail -3 && ls build/Muxteroid.app/Contents/Resources/pipeline.py build/Muxteroid.app/Contents/Resources/pipeline_tracker.py`
+Run: `./build.sh 2>&1 | tail -3 && ls build/Meridian.app/Contents/Resources/pipeline.py build/Meridian.app/Contents/Resources/pipeline_tracker.py`
 Expected: the build completes and both files are listed.
 
 - [ ] **Step 5: Check the bridge end to end against a scratch home**
 
 ```bash
 scratch="$(mktemp -d)"
-export MUXTEROID_HOME="$scratch/Application Support/Muxteroid"; mkdir -p "$MUXTEROID_HOME"
+export MERIDIAN_HOME="$scratch/Application Support/Meridian"; mkdir -p "$MERIDIAN_HOME"
 demo="$scratch/demo repo"; mkdir -p "$demo"; git -C "$demo" init -q -b main
 git -C "$demo" -c user.name=T -c user.email=t@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m Initial
-bridge="$PWD/build/Muxteroid.app/Contents/Resources/streams.py"
+bridge="$PWD/build/Meridian.app/Contents/Resources/streams.py"
 show() { /usr/bin/python3 "$bridge" list | /usr/bin/python3 -c "import json,sys; [print(s['title'], '|', (s['pipeline'] or {}).get('name'), [(p['id'], p['mark'], p['detail']) for p in (s['pipeline'] or {}).get('phases', [])][:3], [d['kind'] for d in s['documents']]) for s in json.load(sys.stdin)]"; }
 plain=$(/usr/bin/python3 "$bridge" create "Plain" "$demo" "" claude)
 run=$(/usr/bin/python3 "$bridge" create "With a run" "$demo" "" claude)
@@ -1086,15 +1086,15 @@ Expected, for "With a run": first `('execute', 'running', '1 of 8')`; after `clo
 
 - [ ] **Step 6: Prepare the window check for the owner**
 
-The built app shares its bundle identifier, and so its preferences and notifications, with the Muxteroid the owner is running. Make a separate copy and start it without waiting on it:
+The built app shares its bundle identifier, and so its preferences and notifications, with the Meridian the owner is running. Make a separate copy and start it without waiting on it:
 
 ```bash
-cp -R build/Muxteroid.app "$scratch/MuxteroidCheck.app"
-/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.muxteroid.check' "$scratch/MuxteroidCheck.app/Contents/Info.plist"
-codesign --force --sign - "$scratch/MuxteroidCheck.app"
+cp -R build/Meridian.app "$scratch/MeridianCheck.app"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.meridian.check' "$scratch/MeridianCheck.app/Contents/Info.plist"
+codesign --force --sign - "$scratch/MeridianCheck.app"
 printf '# SDD ledger\nTask 1: complete\n' > "$ws/progress.md"; touch "$root/docs/superpowers/plans/2026-11-10-superpowers-pipeline.md"
 cp "$root/docs/superpowers/plans/2026-11-10-superpowers-pipeline.md" "$root/docs/superpowers/plans/2026-11-11-second.md"
-open -n --env MUXTEROID_HOME="$MUXTEROID_HOME" "$scratch/MuxteroidCheck.app"
+open -n --env MERIDIAN_HOME="$MERIDIAN_HOME" "$scratch/MeridianCheck.app"
 echo "$scratch"
 ```
 
@@ -1116,6 +1116,6 @@ Run: `/usr/bin/python3 -m unittest discover -s Tests`
 Expected: `OK` with 84 tests, 3 skipped.
 
 ```bash
-git add Sources/DocumentWindow.swift Sources/Muxteroid.swift Sources/WorkstreamInspector.swift README.md
+git add Sources/DocumentWindow.swift Sources/Meridian.swift Sources/WorkstreamInspector.swift README.md
 git commit -m "Open specs and plans in a document window"
 ```

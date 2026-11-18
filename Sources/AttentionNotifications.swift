@@ -15,7 +15,7 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
     private var focusReport: Task<Void, Never>?
     private let center = UNUserNotificationCenter.current()
     private let defaultsKey = "presentedAttentionRequests"
-    private let log = Logger(subsystem: "local.muxteroid.app", category: "notifications")
+    private let log = Logger(subsystem: "local.meridian.app", category: "notifications")
     private var lastPipelinePoll = Date.distantPast
     private var pipelinePollRunning = false
 

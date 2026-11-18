@@ -26,7 +26,7 @@ def error(message):
 def _write(message):
     try:
         now = datetime.now(timezone.utc)
-        folder = Path.home() / "Library/Logs/Muxteroid"
+        folder = Path.home() / "Library/Logs/Meridian"
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         path = folder / f"workstream-{now.date()}.log"
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)

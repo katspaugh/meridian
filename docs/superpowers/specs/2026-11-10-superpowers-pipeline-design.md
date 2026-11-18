@@ -4,11 +4,11 @@ Date: 2026-11-10
 
 ## Intent
 
-People who drive a workstream with the [Superpowers](https://github.com/obra/superpowers) plugin go through a fixed sequence: brainstorm a design, write a plan, execute the plan task by task, review, verify, open a PR, wait for CI, merge. Today Muxteroid shows none of that. The inspector lists Beads tasks and the agent's last reply, and the spec and plan the agent wrote are files you have to go and find in the worktree.
+People who drive a workstream with the [Superpowers](https://github.com/obra/superpowers) plugin go through a fixed sequence: brainstorm a design, write a plan, execute the plan task by task, review, verify, open a PR, wait for CI, merge. Today Meridian shows none of that. The inspector lists Beads tasks and the agent's last reply, and the spec and plan the agent wrote are files you have to go and find in the worktree.
 
 This feature makes the run visible where the workstream already lives: the right sidebar shows a timeline of the run and links to the spec and plan written in that workstream.
 
-The behavioural reference is a personal Claude Code mod, `~/.claude/mods/pipeline` (`hooks/model.ts`, `hooks/register.tsx`, `hooks/view.ts`, and its tests). It draws the same timeline as a pane inside Claude Code. Muxteroid does not use that mod, but its rules are the ones to port. They are restated below so this document stands alone.
+The behavioural reference is a personal Claude Code mod, `~/.claude/mods/pipeline` (`hooks/model.ts`, `hooks/register.tsx`, `hooks/view.ts`, and its tests). It draws the same timeline as a pane inside Claude Code. Meridian does not use that mod, but its rules are the ones to port. They are restated below so this document stands alone.
 
 ## What was decided, and by whom
 
@@ -23,16 +23,16 @@ Everything else in this document is the author's call (Claude), accepted by the 
 ## Goals
 
 1. The inspector shows a Pipeline section for a workstream that has Superpowers activity: phases in order, per-task progress, clock times, estimates for what is still to come, and a marker when the run is waiting on the person.
-2. The section links to the specs and plans written in that workstream. One click opens the document, readable, without leaving Muxteroid.
+2. The section links to the specs and plans written in that workstream. One click opens the document, readable, without leaving Meridian.
 3. It works with whatever Superpowers installation the person already has, in Claude Code and, more coarsely, in Codex.
 
 ## Non-goals
 
 - No view across workstreams: nothing new in the left sidebar or the sprint board.
-- Muxteroid does not install, bundle, load or configure Superpowers.
+- Meridian does not install, bundle, load or configure Superpowers.
 - No token or cost accounting. (The mod shows tokens; Claude's command hooks do not report usage.)
 - No editing of specs or plans in the app.
-- No dependence on the personal `pipeline` mod or its store file (`~/.claude/plugins/store/pipeline_inline-*.json`). Muxteroid is a public app and that mod is not shipped with it.
+- No dependence on the personal `pipeline` mod or its store file (`~/.claude/plugins/store/pipeline_inline-*.json`). Meridian is a public app and that mod is not shipped with it.
 
 ## Anti-goals
 
@@ -72,7 +72,7 @@ Everything else in this document is the author's call (Claude), accepted by the 
 - **Marks:** done, running, slow (running well past its estimate), failed, to come, and needs you. Use the app's existing state colours (`stateColor`) where they fit; "needs you" is orange like elsewhere in the app.
 - **Needs you.** The active phase is marked "needs you" when the workstream is waiting on the person (its state is Needs you or Review), no subagent is working, CI is not what is running, and the run is not finished.
 - **Documents.** Below the timeline, one row per spec or plan that belongs to this workstream, newest first: kind (Spec or Plan), title (the file's first `# ` heading, else its name without date and `.md`), and a control that opens it.
-- **Opening a document (Call).** It opens in its own Muxteroid window, rendered as Markdown with the MarkdownUI package the app already uses, with buttons for Open in Editor (the system default for the file) and Reveal in Finder. It never loads images from the network, and only `.md` files are ever listed. The window picks up changes to the file while it is open. A missing file says so instead of showing an empty window.
+- **Opening a document (Call).** It opens in its own Meridian window, rendered as Markdown with the MarkdownUI package the app already uses, with buttons for Open in Editor (the system default for the file) and Reveal in Finder. It never loads images from the network, and only `.md` files are ever listed. The window picks up changes to the file while it is open. A missing file says so instead of showing an empty window.
 - **Times** follow the Mac's 12/24-hour setting.
 - The section and its rows have accessibility labels in words ("Plan, done at 13:20, 6 tasks"), as other controls in the app do.
 
@@ -90,7 +90,7 @@ Advancing to a phase: do nothing if any later phase has already started; otherwi
 
 ### Events from Claude
 
-Muxteroid already registers a `PostToolUse` command hook with no matcher for every Claude terminal (`streams.settings`, handled in `streams.hook`), so successful Skill, Bash, Write and Edit calls already arrive there. Events that carry an `agent_id` come from subagents and are ignored for the pipeline, as the mod does. The payload shapes were captured from Claude Code on 2026-11-10 and are recorded in the plan.
+Meridian already registers a `PostToolUse` command hook with no matcher for every Claude terminal (`streams.settings`, handled in `streams.hook`), so successful Skill, Bash, Write and Edit calls already arrive there. Events that carry an `agent_id` come from subagents and are ignored for the pipeline, as the mod does. The payload shapes were captured from Claude Code on 2026-11-10 and are recorded in the plan.
 
 - **Skill** (`tool_input.skill`, with or without the `superpowers:` prefix for the first three):
   - `brainstorming` → brainstorm. `writing-plans` → plan. `subagent-driven-development` or `executing-plans` → execute.
@@ -154,7 +154,7 @@ Per-task progress comes only from the subagent-driven flow's `sdd-workspace`, `t
 
 ### When a run ends or goes quiet
 
-**Call:** the mod treats a run older than 24 hours as stale and ignores further events. Muxteroid does not: a workstream can run for days, and the run belongs to the workstream, so it stays live until it is merged, closed, replaced, or cleared.
+**Call:** the mod treats a run older than 24 hours as stale and ignores further events. Meridian does not: a workstream can run for days, and the run belongs to the workstream, so it stays live until it is merged, closed, replaced, or cleared.
 
 A run can stop short of merged: a branch finished without a PR, an abandoned brainstorm, a PR left open. Two things bound that (Call):
 
@@ -170,7 +170,7 @@ A run can stop short of merged: a branch finished without a PR, an abandoned bra
 
 Once a document belongs it stays listed for as long as the file exists, including after it is committed. A file is identified by its real path, so a symlinked spelling never lists it twice.
 
-Untracked is the test on purpose. Comparing against the commit the branch started from would also pick up other people's specs after a merge or rebase from the main branch, and a pull in a shared checkout would do the same to a modification-time test; neither produces untracked files. The cost is accepted: a document that a Codex terminal both creates and commits while Muxteroid is not running is missed. Workstreams that share one plain folder also share its new documents.
+Untracked is the test on purpose. Comparing against the commit the branch started from would also pick up other people's specs after a merge or rebase from the main branch, and a pull in a shared checkout would do the same to a modification-time test; neither produces untracked files. The cost is accepted: a document that a Codex terminal both creates and commits while Meridian is not running is missed. Workstreams that share one plain folder also share its new documents.
 
 Scan from the worktree root (`worktreeRoot` in the stream's metadata), not from `folder`, because a workstream can live in a subfolder; fall back to `folder` when there is no worktree. Rescan only when the listing or modification times of the two directories' Markdown files change, and drop documents whose files are gone.
 
@@ -196,8 +196,8 @@ Each stream in the `list` output gains two fields: the pipeline (absent when the
 
 ## Testing
 
-- Python unit tests in `Tests/` in the existing style (`MUXTEROID_HOME` pointed at a temporary directory, `bd` and terminals patched). Cover: phase transitions and the new-run rules; plan parsing; Skill, Write, Bash events with realistic payloads; subagent events ignored; the ledger; the PR view classification; estimates, including a run without task signals; document ownership for a worktree stream (tracked files from a merge excluded) and a plain folder; a files-only (Codex) run and its second run; a completed workstream; clearing a run; concurrent updates not losing an event. The mod's `tests/model.test.ts` is a good source of cases.
-- `swift build` passes and the app is checked by hand against a scratch `MUXTEROID_HOME`, not the live data directory: no section for a plain workstream; a section that fills in as a run proceeds; Clear Pipeline; a document window that opens and follows edits.
+- Python unit tests in `Tests/` in the existing style (`MERIDIAN_HOME` pointed at a temporary directory, `bd` and terminals patched). Cover: phase transitions and the new-run rules; plan parsing; Skill, Write, Bash events with realistic payloads; subagent events ignored; the ledger; the PR view classification; estimates, including a run without task signals; document ownership for a worktree stream (tracked files from a merge excluded) and a plain folder; a files-only (Codex) run and its second run; a completed workstream; clearing a run; concurrent updates not losing an event. The mod's `tests/model.test.ts` is a good source of cases.
+- `swift build` passes and the app is checked by hand against a scratch `MERIDIAN_HOME`, not the live data directory: no section for a plain workstream; a section that fills in as a run proceeds; Clear Pipeline; a document window that opens and follows edits.
 
 ## Left to the builder
 

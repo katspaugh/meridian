@@ -13,8 +13,8 @@ import time
 import unittest
 
 
-@unittest.skipUnless(os.environ.get('MUXTEROID_PTY_TESTS') == '1' and shutil.which('dtach'),
-                     'Set MUXTEROID_PTY_TESTS=1 to run real PTY lifecycle tests')
+@unittest.skipUnless(os.environ.get('MERIDIAN_PTY_TESTS') == '1' and shutil.which('dtach'),
+                     'Set MERIDIAN_PTY_TESTS=1 to run real PTY lifecycle tests')
 class TerminalLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='mx-exit-', dir='/tmp')
@@ -22,7 +22,7 @@ class TerminalLifecycleTests(unittest.TestCase):
         self.sockets = self.root / 'sockets'
         self.sockets.mkdir(mode=0o700)
         self.connections = []
-        self.env = dict(os.environ, MUXTEROID_HOME=str(self.root), SHELL='/bin/sh')
+        self.env = dict(os.environ, MERIDIAN_HOME=str(self.root), SHELL='/bin/sh')
         self.helper = self.root / 'session.py'
         source = str(Path(__file__).resolve().parents[1] / 'Sources')
         self.helper.write_text(

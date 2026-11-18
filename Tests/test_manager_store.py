@@ -124,7 +124,7 @@ class ManagerStoreTests(unittest.TestCase):
     def test_second_ask_replaces_the_first_for_a_terminal(self):
         store.open_ask(self.db, "s1", "t1", "Pick a database", ["Postgres", "SQLite"], "SQLite", now=1)
         latest = store.open_ask(self.db, "s1", "t1", "Pick a port", ["8080"], None, now=2)
-        other = store.open_ask(self.db, "s2", "t2", "Pick a name", [], "Muxteroid", now=3)
+        other = store.open_ask(self.db, "s2", "t2", "Pick a name", [], "Meridian", now=3)
         asks = store.state(self.db)["asks"]
         self.assertEqual([a["id"] for a in asks], [latest, other])
         self.assertEqual(asks[0]["options"], ["8080"])

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Sources"))
 with tempfile.TemporaryDirectory() as home:
-    with patch.dict(os.environ, MUXTEROID_HOME=home):
+    with patch.dict(os.environ, MERIDIAN_HOME=home):
         import streams
 
 links = streams.links

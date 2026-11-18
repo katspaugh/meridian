@@ -13,7 +13,7 @@ class ClaudeUsageTests(unittest.TestCase):
     def reply(self, data):
         return subprocess.CompletedProcess([], 0, json.dumps({
             "type": "control_response", "response": {
-                "subtype": "success", "request_id": "muxteroid-usage", "response": data,
+                "subtype": "success", "request_id": "meridian-usage", "response": data,
             },
         }) + "\n")
 

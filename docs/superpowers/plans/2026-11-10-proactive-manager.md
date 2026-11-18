@@ -12,7 +12,7 @@ Implementation order follows the Beads children: storage, review/activity integr
 
 ## Verification — 2026-11-10
 
-Implemented all five steps. `python3 -m unittest discover -s Tests -p 'test_*.py'` ran 288 tests successfully (three existing opt-in PTY lifecycle tests skipped). `./build.sh` produced and signed `build/Muxteroid.app`; this is a local bundle, not an installed release.
+Implemented all five steps. `python3 -m unittest discover -s Tests -p 'test_*.py'` ran 288 tests successfully (three existing opt-in PTY lifecycle tests skipped). `./build.sh` produced and signed `build/Meridian.app`; this is a local bundle, not an installed release.
 
 `python3 Tests/manager_layout.py` compiles the production slot and checks empty, status, multiple-message, question and 100-character states. All retain a 120-point slot and the same footer position; PNGs are written to `/tmp/mux-manager-layout`. Long text fits within two lines with limited font scaling.
 

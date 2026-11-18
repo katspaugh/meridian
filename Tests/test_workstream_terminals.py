@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Sources"))
 with tempfile.TemporaryDirectory() as home:
-    with patch.dict(os.environ, MUXTEROID_HOME=home):
+    with patch.dict(os.environ, MERIDIAN_HOME=home):
         import streams
 REVIEW = streams.manager.review
 
@@ -123,8 +123,8 @@ class WorkstreamTerminalsTests(unittest.TestCase):
                 args = run.call_args.args[0]
                 options = run.call_args.kwargs
                 self.assertEqual(options['cwd'], self.folder)
-                self.assertEqual(options['env']['MUXTEROID_ISSUE'], self.parent['id'])
-                self.assertEqual(options['env']['MUXTEROID_TERMINAL'], key)
+                self.assertEqual(options['env']['MERIDIAN_ISSUE'], self.parent['id'])
+                self.assertEqual(options['env']['MERIDIAN_TERMINAL'], key)
                 self.assertEqual(options['env']['BEADS_DIR'], str(self.root / '.beads'))
                 self.assertIn(str(streams.TERMINALS / key), args)
                 if provider == 'codex':

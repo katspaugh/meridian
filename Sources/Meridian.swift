@@ -142,7 +142,7 @@ enum Bridge {
             let context = "action=\(action) stream=\(stream)"
             if traced {
                 WorkstreamLog.record("\(context) spawning bridge")
-                p.environment = ProcessInfo.processInfo.environment.merging(["MUXTEROID_TRACE_REFRESH": "1"]) { _, new in new }
+                p.environment = ProcessInfo.processInfo.environment.merging(["MERIDIAN_TRACE_REFRESH": "1"]) { _, new in new }
             }
             p.standardOutput = output
             if input != nil { p.standardInput = stdin }
@@ -881,6 +881,17 @@ struct NewStream: View {
 }
 
 @main struct MeridianApp: App {
+    init() {
+        let defaults = UserDefaults.standard
+        let domain = "local.meridian.app"
+        if !defaults.bool(forKey: "didMigrateBrandPreferences"),
+           let previous = defaults.persistentDomain(forName: "local.muxteroid.app") {
+            var preferences = previous.merging(defaults.persistentDomain(forName: domain) ?? [:]) { _, current in current }
+            preferences["didMigrateBrandPreferences"] = true
+            defaults.setPersistentDomain(preferences, forName: domain)
+        }
+    }
+
     @NSApplicationDelegateAdaptor(AttentionNotifications.self) private var notifications
     @Environment(\.openWindow) private var openWindow
     var body: some Scene {

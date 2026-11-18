@@ -45,7 +45,7 @@
 | `Sources/manager.py` (new) | Hook reviews, context, typing into terminals, sweep, chat |
 | `Sources/streams.py` | Registers hooks, routes them to `manager`, new `manager-*` actions |
 | `Sources/ManagerView.swift` (new) | `ManagerStore`, models, the Manager view |
-| `Sources/Muxteroid.swift`, `AttentionNotifications.swift`, `WorkstreamInspector.swift` | Sidebar entry, refresh loop, question in the inspector |
+| `Sources/Meridian.swift`, `AttentionNotifications.swift`, `WorkstreamInspector.swift` | Sidebar entry, refresh loop, question in the inspector |
 | `build.sh`, `Package.swift`, `README.md` | Bundle the new files; document the feature |
 | `Tests/test_manager_store.py`, `test_manager_brain.py`, `test_manager.py`, `test_manager_actions.py` (new) | Unit tests |
 
@@ -180,7 +180,7 @@ Verdict enums: `permission`: `allow, deny, ask`. `denied`: `approve, uphold, ask
 `Sources/manager_role.md`, exact text:
 
 ```markdown
-You are the manager of a team of coding agents working in Muxteroid, a Mac app that runs several Claude Code and Codex workstreams at once. You report to one person: the boss, who owns these projects.
+You are the manager of a team of coding agents working in Meridian, a Mac app that runs several Claude Code and Codex workstreams at once. You report to one person: the boss, who owns these projects.
 
 Two things matter to you. The work should keep moving. And the boss's time is the scarcest thing on the team.
 
@@ -476,7 +476,7 @@ Also: `manager-pause 1` then `manager-state` shows `paused: true`; `manager-dism
 
 **Files:**
 - Create: `Sources/ManagerView.swift`
-- Modify: `Sources/Muxteroid.swift`, `Sources/AttentionNotifications.swift`, `Sources/WorkstreamInspector.swift`, `README.md`
+- Modify: `Sources/Meridian.swift`, `Sources/AttentionNotifications.swift`, `Sources/WorkstreamInspector.swift`, `README.md`
 
 **Interfaces:**
 - Consumes: the bridge actions and the `manager-state` JSON shape from Tasks 1 and 5, through the existing `Bridge.run(_:)`.
@@ -517,10 +517,10 @@ Requirements:
 - Call `markSeen()` two seconds after the view appears, and again when new events arrive while it is showing.
 - `WorkstreamInspector` takes `asks: [ManagerAsk]` (those for this stream) and shows each above the task list under the heading "The manager needs your call", with summary, options and recommendation.
 - Match the existing views: system fonts, `.bar` backgrounds for headers, `stateColor` for states, `textSelection(.enabled)` on text the user may copy, accessibility labels on icon-only buttons.
-- `README.md`: add a bullet under "Working across streams" headed **Let the manager keep work moving.** covering what it reviews (auto-mode blocks, questions, plans, turn ends), that product decisions are taken and logged for later reading, when it asks, the pause switch, the notes file at `~/Library/Application Support/Muxteroid/manager/notes.md`, that each review takes 15 to 60 seconds of Claude usage, that running terminals need a restart to pick it up, and that Codex approvals stay with the user. Add one sentence to "How it runs" saying reviews run through `claude -p` on the user's login with read-only tools.
+- `README.md`: add a bullet under "Working across streams" headed **Let the manager keep work moving.** covering what it reviews (auto-mode blocks, questions, plans, turn ends), that product decisions are taken and logged for later reading, when it asks, the pause switch, the notes file at `~/Library/Application Support/Meridian/manager/notes.md`, that each review takes 15 to 60 seconds of Claude usage, that running terminals need a restart to pick it up, and that Codex approvals stay with the user. Add one sentence to "How it runs" saying reviews run through `claude -p` on the user's login with read-only tools.
 
 - [ ] **Step 1: Implement** the files above.
-- [ ] **Step 2: Build.** Run `./build.sh`. Expected: exits 0 and `build/Muxteroid.app` exists. (The first build downloads packages.)
+- [ ] **Step 2: Build.** Run `./build.sh`. Expected: exits 0 and `build/Meridian.app` exists. (The first build downloads packages.)
 - [ ] **Step 3: Run the full Python suite.** Expected: all pass.
 - [ ] **Step 4: Commit** the five files.
 

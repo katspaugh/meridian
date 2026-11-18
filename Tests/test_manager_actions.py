@@ -20,7 +20,7 @@ import manager_store as store
 import test_manager
 
 with tempfile.TemporaryDirectory() as home:
-    with patch.dict(os.environ, MUXTEROID_HOME=home):
+    with patch.dict(os.environ, MERIDIAN_HOME=home):
         import streams
 
 ERROR = "Meridian could not be reached. Check that Claude Code is signed in, then try again."

@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Sources"))
 with tempfile.TemporaryDirectory() as home:
-    with patch.dict(os.environ, MUXTEROID_HOME=home):
+    with patch.dict(os.environ, MERIDIAN_HOME=home):
         import streams
 import pipeline
 import pipeline_tracker as tracker
@@ -633,7 +633,7 @@ class ErrorLogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, patch.object(Path, 'home', return_value=Path(home)), \
                 patch.object(trace, '_context', None):
             trace.error('pipeline failed type=RuntimeError in=tool_event')
-            logs = list((Path(home) / 'Library/Logs/Muxteroid').glob('workstream-*.log'))
+            logs = list((Path(home) / 'Library/Logs/Meridian').glob('workstream-*.log'))
             self.assertEqual(len(logs), 1)
             text = logs[0].read_text()
         self.assertRegex(text, r'^\S+Z bridge\[\d+\] - pipeline failed type=RuntimeError in=tool_event\n$')

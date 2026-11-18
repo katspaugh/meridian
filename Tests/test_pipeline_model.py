@@ -138,7 +138,7 @@ class EventRuleTests(unittest.TestCase):
         self.assertEqual(merged['phases']['merge']['status'], 'done')
 
     def test_workspace_and_brief_paths_may_contain_spaces(self):
-        path = '/Users/a/Library/Application Support/Muxteroid/worktrees/abc/.superpowers/sdd/2026-10-09-pipeline-pane'
+        path = '/Users/a/Library/Application Support/Meridian/worktrees/abc/.superpowers/sdd/2026-10-09-pipeline-pane'
         self.assertEqual(pipeline.workspace_path('bash scripts/sdd-workspace docs/p.md', 'note\n' + path + '\n'), path)
         self.assertIsNone(pipeline.workspace_path('ls', path))
         self.assertIsNone(pipeline.workspace_path('sdd-workspace x', 'no such plan file: x'))

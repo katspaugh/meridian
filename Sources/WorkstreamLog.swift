@@ -2,9 +2,9 @@ import Foundation
 import Darwin
 
 enum WorkstreamLog {
-    private static let queue = DispatchQueue(label: "local.muxteroid.workstream-log", qos: .utility)
+    private static let queue = DispatchQueue(label: "local.meridian.workstream-log", qos: .utility)
     private static let directory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/Muxteroid", isDirectory: true)
+        .appendingPathComponent("Library/Logs/Meridian", isDirectory: true)
     private static let formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

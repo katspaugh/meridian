@@ -5,7 +5,7 @@ import Network
 /// Connect the Ghostty surface directly to the persistent dtach server.
 /// Closing a surface releases its socket without waiting for a PTY child to exit.
 final class DtachConnection: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "local.muxteroid.dtach")
+    private let queue = DispatchQueue(label: "local.meridian.dtach")
     private let socket: NWConnection
     private let streamID: String
     private let onDisconnect: () -> Void

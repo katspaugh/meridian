@@ -6,11 +6,11 @@ mkdir -p "$contents/MacOS" "$contents/Resources"
 swift build -c release
 bin=$(swift build -c release --show-bin-path)
 cp "$bin/Meridian" "$contents/MacOS/"
-for bundle in "$bin"/*.bundle; do
+for bundle in "$bin"/GhosttyKit_GhosttyTerminal.bundle "$bin"/Meridian_Meridian.bundle; do
     cp -R "$bundle" "$contents/Resources/"
 done
 # streams.py last: a hook that fires during a rebuild must find every module it imports.
-cp Sources/workstream_log.py Sources/workstream_links.py Sources/subagents.py Sources/agent_navigation.py Sources/codex_session.py Sources/usage_limits.py \
+cp Sources/meridian_paths.py Sources/workstream_log.py Sources/workstream_links.py Sources/subagents.py Sources/agent_navigation.py Sources/codex_session.py Sources/usage_limits.py \
     Sources/pipeline.py Sources/pipeline_tracker.py \
     Sources/app_settings.py Sources/manager_comments.py Sources/manager.py Sources/manager_store.py Sources/manager_brain.py Sources/manager_role.md "$contents/Resources/"
 cp Sources/streams.py "$contents/Resources/"
@@ -22,8 +22,9 @@ cp Assets/Meridian.icns "$contents/Resources/"
 cat > "$contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>local.muxteroid.app</string>
+<key>CFBundleIdentifier</key><string>local.meridian.app</string>
 <key>CFBundleName</key><string>Meridian</string>
+<key>CFBundleDisplayName</key><string>Meridian</string>
 <key>CFBundleIconFile</key><string>Meridian.icns</string>
 <key>CFBundleExecutable</key><string>Meridian</string>
 <key>CFBundlePackageType</key><string>APPL</string>
