@@ -52,6 +52,16 @@ final class AttentionNotifications: NSObject, NSApplicationDelegate, UNUserNotif
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let caffeinate = Process()
+        caffeinate.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        // Watching Meridian's PID also releases the assertions after a force quit.
+        caffeinate.arguments = ["-dimsu", "-w", String(ProcessInfo.processInfo.processIdentifier)]
+        do {
+            try caffeinate.run()
+        } catch {
+            log.error("Unable to launch caffeinate: \(error.localizedDescription)")
+        }
+
         Task {
             do {
                 _ = try await center.requestAuthorization(options: [.alert, .sound])
