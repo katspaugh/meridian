@@ -132,6 +132,44 @@ class WorkstreamTerminalsTests(unittest.TestCase):
                 if provider == 'claude':
                     self.assertIn(key, args[args.index('--settings') + 1])
 
+    def test_soul_starts_claude_on_upgrade_and_reuses_its_live_socket(self):
+        self.live.add("meridian-soul")  # Pre-upgrade Codex terminal is still running.
+        config = self.root / "claude-config"
+        env = dict(CLAUDE_CONFIG_DIR=str(config), MERIDIAN_ISSUE="parent", MERIDIAN_TERMINAL="child",
+                   CLAUDECODE="1", CLAUDE_CODE_ENTRYPOINT="cli")
+        with patch.dict(os.environ, env), patch.object(streams.shutil, "which", side_effect=lambda tool: tool), \
+             patch.object(streams, "run") as run:
+            path = streams.manager_terminal()
+            args = run.call_args.args[0]
+            options = run.call_args.kwargs
+            self.assertNotEqual(path.name, "meridian-soul")
+            self.assertEqual(args[:6], ["dtach", "-n", str(path), "-r", "winch", "claude"])
+            self.assertIn("manager-tell", args[args.index("--append-system-prompt") + 1])
+            self.assertIn("--session-id", args)
+            self.assertEqual(options["cwd"], self.root / "manager" / "terminal")
+            self.assertEqual(options["env"]["BEADS_DIR"], str(self.root / ".beads"))
+            for var in ("MERIDIAN_ISSUE", "MERIDIAN_TERMINAL", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+                self.assertNotIn(var, options["env"])
+            self.live.add(path.name)
+            self.assertEqual(streams.manager_terminal(), path)
+            run.assert_called_once()
+
+    def test_soul_resumes_its_saved_claude_conversation(self):
+        config = self.root / "claude-config"
+        project = config / "projects" / "manager-terminal"
+        project.mkdir(parents=True)
+        (project / "unrelated.jsonl").touch()
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(config)), \
+             patch.object(streams.shutil, "which", side_effect=lambda tool: tool), patch.object(streams, "run") as run:
+            streams.manager_terminal()
+            args = run.call_args.args[0]
+            sid = args[args.index("--session-id") + 1]
+            (project / (sid + ".jsonl")).touch()
+            streams.manager_terminal()
+            args = run.call_args.args[0]
+            self.assertEqual(args[args.index("--resume") + 1], sid)
+            self.assertNotIn("--session-id", args)
+
     def test_claude_resume_uses_only_its_own_transcript(self):
         key = self.register(provider="claude")
         transcript = self.root / "transcript.jsonl"

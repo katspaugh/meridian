@@ -84,4 +84,4 @@ Meridian's source is available under the [MIT License](LICENSE).
 
 ### Talk to Meridian
 
-Meridian opens an embedded Codex CLI terminal. Select **Meridian** or press **⇧⌘M** to return to the same session from any workstream. It uses your local Codex login and settings. Ask it to review your workstreams, create a workstream in a project folder, or send instructions to an idle agent. **Overview** contains the briefing, pending questions, decision log, and previous chat messages. The terminal stays running when you switch views or quit the app.
+Meridian’s Soul runs in an embedded Claude Code terminal. Select **Meridian** or press **⇧⌘M** to return to the same session from any workstream. It uses your local Claude Code login and settings. The first time you open Soul after upgrading from Codex, it starts a new Claude conversation. Ask it to review your workstreams, create a workstream in a project folder, or send instructions to an idle agent. **Overview** contains the briefing, pending questions, decision log, and previous chat messages. The terminal stays running when you switch views or quit the app.

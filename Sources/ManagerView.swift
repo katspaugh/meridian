@@ -216,18 +216,17 @@ struct ManagerView: View {
     private var terminal: some View {
         Group {
             if let socket, let appearance {
-                StreamTerminal(streamID: "meridian-soul", appearance: appearance, socket: socket,
-                               isCodex: true, onDisconnect: {
+                StreamTerminal(streamID: "meridian-soul", appearance: appearance, socket: socket, onDisconnect: {
                     self.socket = nil
                     terminalError = "The Meridian terminal disconnected."
                 })
             } else if let terminalError {
                 VStack(spacing: 8) {
                     Text(terminalError).textSelection(.enabled)
-                    Button("Reconnect to Codex") { launchID = UUID() }
+                    Button("Reconnect to Claude Code") { launchID = UUID() }
                 }
             } else {
-                ProgressView("Opening Codex…")
+                ProgressView("Opening Claude Code…")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
