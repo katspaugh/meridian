@@ -15,6 +15,9 @@ class CommentTests(Fixture):
         super().setUp()
         with self.db() as db:
             store.set_setting(db, 'watch_comments', '1')
+        conflicts = patch.object(comments, 'poll_conflicts')
+        self.poll_conflicts = conflicts.start()
+        self.addCleanup(conflicts.stop)
 
     def seed(self, target='https://github.com/o/r/pull/12', plan=None):
         item = dict(id='comment:1', target=target, url=target + '#comment-1', author='reviewer', body='Fix the empty state.')
@@ -218,6 +221,7 @@ class CommentTests(Fixture):
         with self.db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM manager_comments').fetchone()[0], 1)
             self.assertIsNotNone(store.setting(db, 'comments_since_github'))
+        self.assertEqual(self.poll_conflicts.call_count, 2)
 
     def test_provider_failure_keeps_checkpoint_and_reports_once(self):
         with self.db() as db:
@@ -343,6 +347,134 @@ class ProviderTests(unittest.TestCase):
     def test_linear_identity_ignores_workspace_slug_and_issue_title(self):
         self.assertEqual(comments.identity('https://linear.app/issue/ENG-1'),
                          comments.identity('https://linear.app/team/issue/eng-1/some-title'))
+
+
+
+PR = 'https://github.com/o/r/pull/12'
+SHA = 'a' * 40
+
+
+def node(mergeable='CONFLICTING', repo='o/r', number=12, sha=SHA):
+    return dict(number=number, mergeable=mergeable, headRefOid=sha, repository=dict(nameWithOwner=repo))
+
+
+def page(*nodes, after=None):
+    return dict(search=dict(nodes=list(nodes), pageInfo=dict(hasNextPage=after is not None, endCursor=after)))
+
+
+class ConflictTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        with self.db() as db:
+            store.set_setting(db, 'watch_comments', '1')
+        self.bridge.open_github_stream = Mock(side_effect=AssertionError('no workstream should be created'))
+
+    def poll(self, *pages):
+        with patch.object(comments, 'graphql', side_effect=list(pages)):
+            comments.poll_conflicts(self.bridge, self.rows, manager.transaction)
+
+    def follow(self):
+        comments.follow_up(self.bridge, self.rows, manager.transaction, manager.brain, manager.untrusted, manager._act_one)
+
+    def pending(self):
+        return [key for key, in self.query('SELECT id FROM manager_comments WHERE done=0 ORDER BY rowid')]
+
+    def test_search_pages_and_keeps_only_valid_conflicts(self):
+        pages = [page(node(), node('MERGEABLE', number=13), node('UNKNOWN', number=14), after='next'),
+                 page(node(repo='bad repo'), node(sha='nope'), {}, node(repo='x/y', number=7, sha='b' * 40))]
+        with patch.object(comments, 'graphql', side_effect=pages) as query:
+            items, unknown = comments.conflicts()
+        self.assertEqual([i['id'] for i in items], ['github:conflict:o/r#12:' + SHA, 'github:conflict:x/y#7:' + 'b' * 40])
+        self.assertEqual(items[0]['target'], PR)
+        self.assertEqual(items[0]['url'], PR)
+        self.assertEqual(items[0]['plan']['action'], 'follow')
+        self.assertIn('force-push', items[0]['plan']['message'])
+        self.assertEqual(unknown, {'github:conflict:o/r#14'})
+        self.assertIn('author:@me', query.call_args.args[0])
+        self.assertEqual(query.call_args.args[1], dict(after='next'))
+
+    def test_poll_stores_once_and_drops_conflicts_that_cleared(self):
+        self.poll(page(node()), page(node()))
+        self.assertEqual(self.pending(), ['github:conflict:o/r#12:' + SHA])
+        self.poll(page(node('UNKNOWN')))
+        self.assertEqual(len(self.pending()), 1, 'unknown mergeability is never treated as resolved')
+        self.poll(page(node('MERGEABLE')))
+        self.assertEqual(self.pending(), [])
+
+    def test_unrelated_comments_survive_conflict_cleanup(self):
+        with self.db() as db:
+            db.execute("INSERT INTO manager_comments(id,payload) VALUES ('github:comment:1:now','{}')")
+        self.poll(page())
+        self.assertEqual(self.pending(), ['github:comment:1:now'])
+
+    def test_failure_is_reported_once_without_details_and_listed_once(self):
+        with self.db() as db:
+            store.set_setting(db, 'comments_error_github', comments.GitHubFailure('auth').args[0])
+        self.poll(comments.GitHubFailure('auth'), comments.GitHubFailure('auth'))
+        self.assertEqual(self.setting('comments_error_conflicts'), comments.GitHubFailure.MESSAGES['auth'])
+        self.assertEqual(len(manager.state(self.bridge)['events']), 1)
+        self.assertEqual(manager.state(self.bridge)['commentErrors'], [comments.GitHubFailure.MESSAGES['auth']])
+        self.poll(page())
+        self.assertEqual(self.setting('comments_error_conflicts'), '')
+
+    def test_linked_conflict_is_delivered_with_its_pr_without_a_model_call(self):
+        self.rows[0]['links'] = [dict(url=PR)]
+        self.poll(page(node()))
+        self.follow()
+        self.consult.assert_not_called()
+        self.assertIn(b'PR: ' + PR.encode(), self.typed()[0])
+        self.assertNotIn(b'Comment:', self.typed()[0])
+        self.assertEqual(self.pending(), [])
+
+    def test_new_head_replaces_the_pending_conflict(self):
+        self.rows[0]['links'] = [dict(url=PR)]
+        self.poll(page(node()), page(node(sha='c' * 40)))
+        with patch.object(manager, 'tell', return_value=True) as tell:
+            self.follow()
+        self.assertEqual(tell.call_count, 1)
+        self.assertEqual(self.pending(), [])
+
+    def checkout(self, provider='codex'):
+        self.rows[0].update(repository='/checkouts/r', sourceFolder='/checkouts/r', provider=provider)
+        remotes = patch.object(comments.links, 'command_output', return_value='upstream\norigin')
+        repository = patch.object(comments.links, 'repository', side_effect=lambda folder, remote: 'O/R' if remote == 'origin' else 'other/r')
+        for p in (remotes, repository):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_unmatched_conflict_opens_and_starts_a_workstream_from_a_known_checkout(self):
+        self.checkout()
+        def open_stream(url, folder, provider):
+            created = self.stream(id='w2', terminals=[self.terminal('w2', 'codex', 'Offline', stream='w2', live=False)])
+            created['links'] = [dict(url=url)]
+            self.rows.append(created)
+            return 'w2'
+        self.bridge.open_github_stream = Mock(side_effect=open_stream)
+        self.poll(page(node()))
+        self.follow()
+        self.bridge.open_github_stream.assert_called_once_with(PR, '/checkouts/r', 'codex')
+        self.assertEqual(self.bridge.launched, ['w2'])
+        self.assertIn(('w2', 'comments', 'create'), [(e[0], e[2], e[3]) for e in self.events()])
+        self.assertEqual(len(self.pending()), 1, 'delivered once the new agent is idle')
+        self.assertEqual(manager.state(self.bridge)['asks'], [])
+
+    def test_unmatched_conflict_without_a_checkout_asks_for_a_workstream(self):
+        self.poll(page(node()))
+        self.follow()
+        asks = manager.state(self.bridge)['asks']
+        self.assertEqual(len(asks), 1)
+        self.assertIn('New workstream needed', asks[0]['summary'])
+        self.assertEqual(asks[0]['recommendation'], PR)
+        self.assertEqual(self.pending(), [])
+
+    def test_failed_creation_stays_pending_for_retry(self):
+        self.checkout()
+        self.bridge.open_github_stream = Mock(side_effect=ValueError('fetch failed'))
+        self.poll(page(node()))
+        self.follow()
+        self.assertEqual(len(self.pending()), 1)
+        self.assertEqual(manager.state(self.bridge)['asks'], [])
+        self.assertNotIn('fetch failed', json.dumps(self.events()))
 
 
 if __name__ == '__main__':

@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 import manager_store as store
+import workstream_links as links
 
 INTERVAL = 300
 GITHUB = re.compile(r'https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)', re.I)
@@ -81,6 +82,11 @@ def gh(path, paginate=False):
     args = ['gh', 'api', '--method', 'GET', path]
     if paginate:
         args += ['--paginate', '--slurp']
+    value = gh_json(args)
+    return [item for page in value for item in page] if paginate else value
+
+
+def gh_json(args):
     try:
         proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
@@ -106,10 +112,82 @@ def gh(path, paginate=False):
             kind = 'request'
         raise GitHubFailure(kind)
     try:
-        value = json.loads(proc.stdout)
+        return json.loads(proc.stdout)
     except ValueError:
         raise GitHubFailure('request') from None
-    return [item for page in value for item in page] if paginate else value
+
+
+def graphql(query, variables):
+    args = ['gh', 'api', 'graphql', '-f', 'query=' + query]
+    for name, value in variables.items():
+        if value is not None:
+            args += ['-f', f'{name}={value}']
+    result = gh_json(args)
+    if not isinstance(result, dict) or result.get('errors') or not isinstance(result.get('data'), dict):
+        raise GitHubFailure('request')
+    return result['data']
+
+
+CONFLICT_SEARCH = '''query($after: String) {
+  search(query: "is:pr is:open author:@me archived:false", type: ISSUE, first: 100, after: $after) {
+    nodes { ... on PullRequest { number mergeable headRefOid repository { nameWithOwner } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+CONFLICT_PAGES = 10
+# Fixed text only: PR titles and branch names from GitHub never become terminal input.
+CONFLICT_MESSAGE = ('This pull request has merge conflicts with its base branch. Merge the base branch into the PR '
+                    'branch, resolve the conflicts, run the tests, and push to the PR head branch (gh pr view shows it). '
+                    'Do not rebase or force-push.')
+
+
+def conflicts():
+    """Return conflicting authored PRs as inbox items, and the PRs whose mergeability GitHub has not computed."""
+    items, unknown, after = [], set(), None
+    for _ in range(CONFLICT_PAGES):
+        search = graphql(CONFLICT_SEARCH, dict(after=after)).get('search') or {}
+        for pull in search.get('nodes') or []:
+            repo = ((pull or {}).get('repository') or {}).get('nameWithOwner') or ''
+            number, sha = pull.get('number') if pull else None, (pull or {}).get('headRefOid') or ''
+            if not (re.fullmatch(r'[\w.-]+/[\w.-]+', repo) and type(number) is int and number > 0):
+                continue
+            key = f'github:conflict:{repo.lower()}#{number}'
+            if pull.get('mergeable') == 'UNKNOWN':
+                unknown.add(key)
+            if pull.get('mergeable') != 'CONFLICTING' or not re.fullmatch(r'[0-9a-f]{40,64}', sha):
+                continue
+            url = f'https://github.com/{repo}/pull/{number}'
+            items.append(dict(id=f'{key}:{sha}', target=url, url=url, author='', kind='conflict',
+                              body='Merge conflict with the base branch.',
+                              plan=dict(action='follow', message=CONFLICT_MESSAGE)))
+        page = search.get('pageInfo') or {}
+        if not page.get('hasNextPage') or not page.get('endCursor') or page['endCursor'] == after:
+            break
+        after = page['endCursor']
+    return items, unknown
+
+
+def poll_conflicts(bridge, rows, transaction):
+    """Queue each conflicting head once, and drop queued conflicts that have since cleared."""
+    try:
+        items, unknown = conflicts()
+    except Exception as exc:
+        message = github_error(exc)
+        with transaction(bridge) as db:
+            if store.setting(db, 'comments_error_conflicts') != message:
+                store.record_event(db, '', '', 'comments', 'unavailable', message)
+            store.set_setting(db, 'comments_error_conflicts', message)
+        return
+    current = {item['id'] for item in items}
+    with transaction(bridge) as db:
+        for item in items:
+            plan = item.pop('plan')
+            db.execute('INSERT OR IGNORE INTO manager_comments (id,payload,plan) VALUES (?,?,?)',
+                       (item['id'], json.dumps(item), json.dumps(plan)))
+        for (key,) in db.execute("SELECT id FROM manager_comments WHERE done=0 AND id LIKE 'github:conflict:%'").fetchall():
+            if key not in current and key.rsplit(':', 1)[0] not in unknown:
+                db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
+        store.set_setting(db, 'comments_error_conflicts', '')
 
 
 def github(rows, since):
@@ -252,6 +330,7 @@ def poll(bridge, rows, transaction):
                 if store.setting(db, 'comments_error_' + name) != message:
                     store.record_event(db, '', '', 'comments', 'unavailable', message)
                 store.set_setting(db, 'comments_error_' + name, message)
+    poll_conflicts(bridge, rows, transaction)
 
 
 def recover_ambiguous(db):
@@ -269,6 +348,40 @@ def recover_ambiguous(db):
                 db.execute('UPDATE manager_comments SET done=0 WHERE id=?', (key,))
                 store.resolve_asks(db, ask_id=ask_id)
                 break
+
+
+def checkout(rows, target):
+    """A local checkout of the PR's repository that a workstream already uses, with that stream's agent."""
+    repo = GITHUB.match(target or '')
+    if not repo:
+        return None
+    seen = set()
+    for row in sorted(rows, key=lambda row: row.get('state') == 'Done'):
+        for folder in (row.get('repository'), row.get('sourceFolder')):
+            if not folder or folder in seen:
+                continue
+            seen.add(folder)
+            for remote in links.command_output(['git', 'remote'], folder).splitlines():
+                if links.repository(folder, remote).casefold() == repo[1].casefold():
+                    provider = row.get('provider') if row.get('provider') in ('claude', 'codex') else 'claude'
+                    return folder, provider
+    return None
+
+
+def open_stream(bridge, rows, transaction, item):
+    """Open a workstream for an unmatched PR conflict. Returns fresh rows, None to retry, or False when no checkout."""
+    found = checkout(rows, item['target'])
+    if not found:
+        return False
+    try:
+        stream = bridge.open_github_stream(item['target'], *found)
+    except Exception:
+        return None  # Never store the error: git and gh output can contain sensitive data.
+    with transaction(bridge) as db:
+        store.record_event(db, stream, '', 'comments', 'create', 'Opened a workstream to resolve a merge conflict.',
+                           {'message': item['url']})
+    with bridge.bridge_lock():
+        return bridge.streams()
 
 
 def choose_stream(matches, plan):
@@ -337,7 +450,15 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
             with transaction(bridge) as db:
                 db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
             continue
-        message = str(plan['message']) + '\n\nComment: ' + item['url']
+        conflict = item.get('kind') == 'conflict'
+        message = str(plan['message']) + ('\n\nPR: ' if conflict else '\n\nComment: ') + item['url']
+        if not matches and conflict:
+            fresh = open_stream(bridge, rows, transaction, item)
+            if fresh is None:
+                continue
+            if fresh:
+                rows = fresh
+                matches = matching(rows, item['target'])
         if not matches:
             with transaction(bridge) as db:
                 store.open_ask(db, '', '', 'New workstream needed: ' + concise(plan['message']), [], item['url'])
