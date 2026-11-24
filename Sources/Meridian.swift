@@ -323,6 +323,7 @@ struct Dashboard: View {
     @ObservedObject var manager: ManagerStore
     private enum Pane { case workstream, board, meridian }
     @State private var expanded: Set<Inbox> = [.active]
+    @State private var workstreamQuery = ""
     @State private var adding = false
     @State private var pane = Pane.meridian
     @State private var selection: String?
@@ -552,8 +553,61 @@ struct Dashboard: View {
         }
     }
 
+    @ViewBuilder private var workstreamList: some View {
+        let query = workstreamQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty {
+            ForEach(Inbox.allCases, id: \.self) { box in
+                let streams = store.rows.filter(box.includes)
+                DisclosureGroup(isExpanded: Binding(
+                    get: { expanded.contains(box) },
+                    set: { if $0 { expanded.insert(box) } else { expanded.remove(box) } }
+                )) {
+                    ForEach(streams) { stream in streamBranch(stream) }
+                } label: {
+                    Label(box.rawValue, systemImage: box.icon).badge(streams.count)
+                }
+            }
+        } else {
+            let matches = store.rows.filter {
+                $0.title.localizedStandardContains(query) || $0.id.localizedStandardContains(query)
+            }
+            if matches.isEmpty {
+                Text("No matching workstreams").foregroundStyle(.secondary)
+            } else {
+                ForEach([Inbox.active, .done], id: \.self) { box in
+                    let streams = matches.filter(box.includes)
+                    if !streams.isEmpty {
+                        Section {
+                            ForEach(streams) { stream in streamBranch(stream) }
+                        } header: {
+                            Text(box.rawValue)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                TextField("Search workstreams", text: $workstreamQuery)
+                    .textFieldStyle(.plain)
+                    .onExitCommand { workstreamQuery = "" }
+                if !workstreamQuery.isEmpty {
+                    Button { workstreamQuery = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(6)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
             List {
                 Button { pane = .meridian } label: {
                     Label("Meridian", systemImage: "sparkle")
@@ -570,19 +624,7 @@ struct Dashboard: View {
                 .buttonStyle(.plain).disabled(switching)
                 .listRowBackground(pane == .board ? Color.accentColor.opacity(0.16) : Color.clear)
                 .keyboardShortcut("b", modifiers: [.command, .shift])
-                ForEach(Inbox.allCases, id: \.self) { box in
-                    let streams = store.rows.filter(box.includes)
-                    DisclosureGroup(isExpanded: Binding(
-                        get: { expanded.contains(box) },
-                        set: { if $0 { expanded.insert(box) } else { expanded.remove(box) } }
-                    )) {
-                        ForEach(streams) { stream in
-                            streamBranch(stream)
-                        }
-                    } label: {
-                        Label(box.rawValue, systemImage: box.icon).badge(streams.count)
-                    }
-                }
+                workstreamList
             }
             if pane == .workstream, let stream = selected {
                 Divider()
@@ -735,6 +777,7 @@ struct Dashboard: View {
                     recentFoldersJSON = String(decoding: data, as: UTF8.self)
                 }
                 pane = .workstream
+                workstreamQuery = ""
                 selection = id
                 agentSelection = nil
                 archivedAgent = nil
@@ -755,6 +798,7 @@ struct Dashboard: View {
 
     /// Opening a workstream from the board also reveals it in the sidebar.
     private func openFromOverview(_ stream: Stream) {
+        workstreamQuery = ""
         selectTerminal(stream, agent: nil)
         expanded.insert(stream.state == "Done" ? .done : .active)
     }
@@ -762,6 +806,7 @@ struct Dashboard: View {
     private func selectNotification() {
         guard let id = notifications.destination,
               let stream = store.rows.first(where: { $0.id == id }) else { return }
+        workstreamQuery = ""
         if let terminalID = notifications.terminalDestination {
             rememberTerminal(terminalID, in: stream)
         }
