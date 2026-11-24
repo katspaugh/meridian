@@ -555,36 +555,22 @@ struct Dashboard: View {
 
     @ViewBuilder private var workstreamList: some View {
         let query = workstreamQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        if query.isEmpty {
-            ForEach(Inbox.allCases, id: \.self) { box in
-                let streams = store.rows.filter(box.includes)
-                DisclosureGroup(isExpanded: Binding(
-                    get: { expanded.contains(box) },
-                    set: { if $0 { expanded.insert(box) } else { expanded.remove(box) } }
-                )) {
-                    ForEach(streams) { stream in streamBranch(stream) }
-                } label: {
-                    Label(box.rawValue, systemImage: box.icon).badge(streams.count)
-                }
+        let matches = query.isEmpty ? store.rows : store.rows.filter {
+            $0.title.localizedStandardContains(query) || $0.id.localizedStandardContains(query)
+        }
+        ForEach(Inbox.allCases, id: \.self) { box in
+            let streams = matches.filter(box.includes)
+            DisclosureGroup(isExpanded: Binding(
+                get: { expanded.contains(box) },
+                set: { if $0 { expanded.insert(box) } else { expanded.remove(box) } }
+            )) {
+                ForEach(streams) { stream in streamBranch(stream) }
+            } label: {
+                Label(box.rawValue, systemImage: box.icon).badge(streams.count)
             }
-        } else {
-            let matches = store.rows.filter {
-                $0.title.localizedStandardContains(query) || $0.id.localizedStandardContains(query)
-            }
-            if matches.isEmpty {
-                Text("No matching workstreams").foregroundStyle(.secondary)
-            } else {
-                ForEach([Inbox.active, .done], id: \.self) { box in
-                    let streams = matches.filter(box.includes)
-                    if !streams.isEmpty {
-                        Section {
-                            ForEach(streams) { stream in streamBranch(stream) }
-                        } header: {
-                            Text(box.rawValue)
-                        }
-                    }
-                }
-            }
+        }
+        if !query.isEmpty && matches.isEmpty {
+            Text("No matching workstreams").foregroundStyle(.secondary)
         }
     }
 
