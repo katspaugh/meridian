@@ -51,6 +51,25 @@ def ensure_shortcut():
                      'or type /meridian-view in Claude to open the selection.')
 
 
+def _read_view(path):
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _showing_agent(directory, session):
+    request = _read_view(directory / "request.json")
+    if request.get("session") != session:
+        return False
+    reply = _read_view(directory / "response.json")
+    if request.get("token") and reply.get("token") == request["token"] and not reply.get("error"):
+        return bool(request.get("agent"))
+    # A denied or unanswered switch leaves the previously confirmed view in place.
+    return request.get("wasShowingAgent", False)
+
+
 def switch(db, root, socket_path, key, identity):
     row = db.execute("SELECT session FROM activity WHERE id=?", (key,)).fetchone()
     if not row or not socket_path.is_socket():
@@ -72,8 +91,14 @@ def switch(db, root, socket_path, key, identity):
         trace.record("acquired switch.lock")
         request = directory / "request.json"
         tmp = request.with_suffix(".tmp")
-        tmp.write_text(json.dumps(dict(session=session, agent=agent, token=token)))
+        was_showing_agent = _showing_agent(directory, session)
+        tmp.write_text(json.dumps(dict(session=session, agent=agent, token=token,
+                                       wasShowingAgent=was_showing_agent)))
         tmp.replace(request)
+        # Opening a workstream normally just focuses its terminal. The Chat shortcut
+        # is only needed to enter an agent or return from one we actually opened.
+        if agent is None and not was_showing_agent:
+            return "shown"
         if ensure_shortcut():
             # Claude hot-reloads keybindings asynchronously.
             time.sleep(1)
@@ -82,10 +107,7 @@ def switch(db, root, socket_path, key, identity):
         trace.record("waiting for Claude switch reply")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            try:
-                reply = json.loads((directory / "response.json").read_text())
-            except (FileNotFoundError, ValueError):
-                reply = {}
+            reply = _read_view(directory / "response.json")
             if reply.get("token") == token:
                 if reply.get("error"):
                     if agent and reply["error"] in ("no agent under that id", "that agent has ended", "that agent is not one the tasks list shows"):
