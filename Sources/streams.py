@@ -176,7 +176,7 @@ def linked_stream(url):
         return min(matches, key=lambda row: row['state'] == 'Done')['id']
 
 
-def open_github_stream(url, folder, provider):
+def open_github_stream(url, folder, provider, brief=None):
     url = links.github_item(url)
     if not url:
         raise ValueError("Paste a GitHub pull request or issue URL.")
@@ -208,7 +208,8 @@ def open_github_stream(url, folder, provider):
         # Fetch the base repository's pull ref, including for PRs from forks.
         run(['git', '-C', str(folder), 'fetch', '--no-tags', '--no-write-fetch-head', '--', remote,
              'refs/pull/' + number + '/head'], timeout=90)
-    brief = url + '\n\n' + (item.get('body') or '')
+    # An automatic opening passes fixed text, so GitHub's body never reaches the agent unasked.
+    brief = url + '\n\n' + (brief if brief is not None else item.get('body') or '')
     with bridge_lock():
         return linked_stream(url) or create_stream(item['title'], folder, url, provider, start_commit=commit, brief=brief)
 

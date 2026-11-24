@@ -444,7 +444,7 @@ class ConflictTests(Fixture):
 
     def test_unmatched_conflict_opens_and_starts_a_workstream_from_a_known_checkout(self):
         self.checkout()
-        def open_stream(url, folder, provider):
+        def open_stream(url, folder, provider, brief=None):
             created = self.stream(id='w2', terminals=[self.terminal('w2', 'codex', 'Offline', stream='w2', live=False)])
             created['links'] = [dict(url=url)]
             self.rows.append(created)
@@ -452,11 +452,33 @@ class ConflictTests(Fixture):
         self.bridge.open_github_stream = Mock(side_effect=open_stream)
         self.poll(page(node()))
         self.follow()
-        self.bridge.open_github_stream.assert_called_once_with(PR, '/checkouts/r', 'codex')
+        self.bridge.open_github_stream.assert_called_once_with(PR, '/checkouts/r', 'codex', brief=comments.CONFLICT_MESSAGE)
         self.assertEqual(self.bridge.launched, ['w2'])
         self.assertIn(('w2', 'comments', 'create'), [(e[0], e[2], e[3]) for e in self.events()])
         self.assertEqual(len(self.pending()), 1, 'delivered once the new agent is idle')
         self.assertEqual(manager.state(self.bridge)['asks'], [])
+
+    def test_second_watch_pass_neither_recreates_nor_prompts_the_new_workstream(self):
+        self.checkout()
+        snapshot = list(self.rows)
+        def open_stream(url, folder, provider, brief=None):
+            created = self.stream(id='w2', terminals=[self.terminal('w2', 'codex', 'Offline', stream='w2', live=False)])
+            created['links'] = [dict(url=url)]
+            self.rows.append(created)
+            return 'w2'
+        self.bridge.open_github_stream = Mock(side_effect=open_stream)
+        with patch.object(comments, 'graphql', return_value=page(node())), patch.object(comments, 'github', return_value=[]), \
+                patch.object(comments, 'linear', return_value=[]):
+            comments.watch(self.bridge, snapshot, manager.transaction, manager.brain, manager.untrusted, manager._act_one)
+        self.bridge.open_github_stream.assert_called_once()
+        self.assertEqual([e[3] for e in self.events()].count('create'), 1)
+        self.assertEqual(self.typed(), [], 'the new agent is still starting')
+        self.assertEqual(len(self.pending()), 1)
+        self.rows[-1]['terminals'][0].update(live=True, state='Ready')  # The next poll sees the started agent.
+        self.set_activity('w2', 'Ready')
+        self.follow()
+        self.assertIn(b'PR: ' + PR.encode(), self.typed()[0])
+        self.assertEqual(self.pending(), [])
 
     def test_unmatched_conflict_without_a_checkout_asks_for_a_workstream(self):
         self.poll(page(node()))
@@ -473,7 +495,10 @@ class ConflictTests(Fixture):
         self.poll(page(node()))
         self.follow()
         self.assertEqual(len(self.pending()), 1)
+        self.follow()
+        self.assertEqual(len(self.pending()), 1)
         self.assertEqual(manager.state(self.bridge)['asks'], [])
+        self.assertEqual([e[3] for e in self.events()].count('unavailable'), 1, 'reported once, then retried quietly')
         self.assertNotIn('fetch failed', json.dumps(self.events()))
 
 

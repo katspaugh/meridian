@@ -136,9 +136,10 @@ CONFLICT_SEARCH = '''query($after: String) {
 }'''
 CONFLICT_PAGES = 10
 # Fixed text only: PR titles and branch names from GitHub never become terminal input.
-CONFLICT_MESSAGE = ('This pull request has merge conflicts with its base branch. Merge the base branch into the PR '
-                    'branch, resolve the conflicts, run the tests, and push to the PR head branch (gh pr view shows it). '
-                    'Do not rebase or force-push.')
+CONFLICT_MESSAGE = ('The pull request linked below has merge conflicts with its base branch. Run gh pr view with that '
+                    'URL to find its base and head branches. Merge the base branch into the PR head branch, resolve the '
+                    'conflicts, run the tests, and push to the head branch. Do not rebase or force-push. If this '
+                    'worktree is not on that head branch, do not switch away from or discard work in progress here.')
 
 
 def conflicts():
@@ -370,13 +371,25 @@ def checkout(rows, target):
 
 def open_stream(bridge, rows, transaction, item):
     """Open a workstream for an unmatched PR conflict. Returns fresh rows, None to retry, or False when no checkout."""
-    found = checkout(rows, item['target'])
+    with bridge.bridge_lock():
+        current = bridge.streams()
+    if matching(current, item['target']):
+        # Opened since this snapshot, possibly moments ago: deliver on a later poll, once its agent has started.
+        return None
+    found = checkout(current, item['target'])
     if not found:
         return False
     try:
-        stream = bridge.open_github_stream(item['target'], *found)
+        stream = bridge.open_github_stream(item['target'], *found, brief=CONFLICT_MESSAGE)
     except Exception:
-        return None  # Never store the error: git and gh output can contain sensitive data.
+        # Never store the error: git and gh output can contain sensitive data.
+        with transaction(bridge) as db:
+            if store.setting(db, 'conflict_open_failed:' + item['id']) != '1':
+                store.set_setting(db, 'conflict_open_failed:' + item['id'], '1')
+                store.record_event(db, '', '', 'comments', 'unavailable',
+                                   'Could not open a workstream for a conflicting pull request. Retrying automatically.',
+                                   {'message': item['url']})
+        return None
     with transaction(bridge) as db:
         store.record_event(db, stream, '', 'comments', 'create', 'Opened a workstream to resolve a merge conflict.',
                            {'message': item['url']})
