@@ -170,6 +170,23 @@ class WorkstreamTerminalsTests(unittest.TestCase):
             self.assertEqual(args[args.index("--resume") + 1], sid)
             self.assertNotIn("--session-id", args)
 
+    def test_terminals_keep_colors_when_the_app_inherited_no_color(self):
+        for provider in streams.PROVIDERS:
+            with self.subTest(provider=provider):
+                key = self.register(key="color-" + provider, provider=provider)
+                with patch.dict(os.environ, NO_COLOR="1"), \
+                     patch.object(streams.shutil, "which", side_effect=lambda name: "/bin/" + name), \
+                     patch.object(streams.shutil, "copyfile"), patch.object(streams, "run") as run:
+                    streams.launch(key)
+                env = run.call_args.kwargs['env']
+                self.assertIsNone(env.get('NO_COLOR'))
+                self.assertEqual(env['COLORTERM'], 'truecolor')
+        with patch.dict(os.environ, NO_COLOR="1"), patch.object(streams, "terminals", return_value=[]), \
+             patch.object(streams.shutil, "which", side_effect=lambda name: "/bin/" + name), \
+             patch.object(streams, "run") as run:
+            streams.manager_terminal()
+        self.assertIsNone(run.call_args.kwargs['env'].get('NO_COLOR'))
+
     def test_claude_resume_uses_only_its_own_transcript(self):
         key = self.register(provider="claude")
         transcript = self.root / "transcript.jsonl"
