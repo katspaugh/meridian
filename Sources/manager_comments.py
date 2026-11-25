@@ -444,7 +444,7 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
         coalesce_pending(db)
         # Review workstreams take only their review requests: other discussion on the PR must not
         # reopen them or have their agent answer on the user's behalf.
-        reviews = {stream for (stream,) in db.execute("SELECT stream FROM review_requests WHERE owned=1 AND stream<>''")}
+        reviews = {stream for (stream,) in db.execute('SELECT stream FROM review_streams')}
         for key, payload in db.execute('SELECT id,payload FROM manager_comments WHERE done=0').fetchall():
             found = matching(rows, json.loads(payload)['target'])
             if (not key.startswith(REVIEW_REQUEST) and found

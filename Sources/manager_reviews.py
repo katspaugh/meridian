@@ -27,6 +27,9 @@ def initialize(db):
     db.execute('''CREATE TABLE IF NOT EXISTS review_requests
         (url TEXT PRIMARY KEY, repo TEXT NOT NULL, stream TEXT NOT NULL DEFAULT '', requested TEXT NOT NULL,
          active INTEGER NOT NULL, owned INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0, prompt TEXT)''')
+    # Every workstream this watcher made, kept apart from per-request rows and never deleted:
+    # its checkout stays someone else's branch whatever later happens to the request.
+    db.execute('CREATE TABLE IF NOT EXISTS review_streams (stream TEXT PRIMARY KEY)')
 
 
 def checkouts(root):
@@ -48,7 +51,7 @@ def initial_prompt(db, stream):
 
 def review_stream(db, stream):
     """True for a workstream this watcher made: its checkout is someone else's branch."""
-    return db.execute('SELECT 1 FROM review_requests WHERE stream=? AND owned=1', (stream,)).fetchone() is not None
+    return db.execute('SELECT 1 FROM review_streams WHERE stream=?', (stream,)).fetchone() is not None
 
 
 def first_prompt(url, me):
@@ -104,11 +107,13 @@ def _start(bridge, rows, transaction, url, repo, association, folder, me, now):
         with transaction(bridge) as db:
             store.open_ask(db, '', '', 'Review requested on a pull request from a fork or an outside author. '
                            'Meridian did not start an agent on it. Open a workstream yourself if you trust it.', [], url)
-            db.execute('''INSERT OR REPLACE INTO review_requests (url,repo,stream,requested,active,owned,closed,prompt)
-                          VALUES (?,?,'',?,1,0,1,NULL)''', (url, repo, now))
+            # Keep an earlier review workstream's row: only stop watching this request.
+            db.execute('''INSERT INTO review_requests (url,repo,requested,active,closed) VALUES (?,?,?,1,1)
+                          ON CONFLICT(url) DO UPDATE SET active=1, closed=1, requested=excluded.requested''',
+                       (url, repo, now))
         return
     with transaction(bridge) as db:
-        owned = {stream for (stream,) in db.execute('SELECT stream FROM review_requests WHERE owned=1')}
+        owned = {stream for (stream,) in db.execute('SELECT stream FROM review_streams')}
     matches = comments.matching(rows, url)
     if matches:
         # A previous review workstream or one the user opened: reuse it through the comment inbox,
@@ -130,6 +135,7 @@ def _start(bridge, rows, transaction, url, repo, association, folder, me, now):
         # Save the prompt before launch reads it as the new session's first message.
         db.execute('''INSERT OR REPLACE INTO review_requests (url,repo,stream,requested,active,owned,closed,prompt)
                       VALUES (?,?,?,?,1,1,0,?)''', (url, repo, key, now, first_prompt(url, me)))
+        db.execute('INSERT OR IGNORE INTO review_streams VALUES (?)', (key,))
         store.record_event(db, key, '', 'reviews', 'create', 'Started a review workstream for ' + url)
     try:
         with bridge.bridge_lock():

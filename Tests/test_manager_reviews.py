@@ -150,6 +150,18 @@ class ReviewTests(Fixture):
                 self.assertIn('fork or an outside author', asks[0][0])
                 self.assertEqual(asks[0][1], URL)
 
+    def test_later_untrusted_request_keeps_the_review_checkout_isolated(self):
+        self.started()
+        self.github.requested = []
+        self.poll()
+        self.github.requested, self.github.association = [URL], 'CONTRIBUTOR'
+        self.poll()
+        self.assertEqual(self.request()[:4], ('w9', 1, 1, 1))
+        with self.db() as db:
+            self.assertTrue(reviews.review_stream(db, 'w9'))
+            db.execute('DELETE FROM review_requests')
+            self.assertTrue(reviews.review_stream(db, 'w9'))
+
     def test_failed_start_is_retried(self):
         self.poll()
         self.github.requested = [URL]
