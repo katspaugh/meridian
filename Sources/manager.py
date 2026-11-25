@@ -20,8 +20,9 @@ REVIEWED_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan"}
 # Linear syncs to Slack, so an agent's Linear writes are drafts until the owner approves each one.
 # Unknown Linear tools count as writes; only these read prefixes run without the owner.
 LINEAR_READS = ("get_", "list_", "search_", "extract_", "whoami")
-# Best effort: direct API calls and the bridge's own posting commands, not scripts that hide them.
-LINEAR_BASH = re.compile(r"(?:curl|wget|http|fetch|requests|urllib)[^\n]*api\.linear\.app|streams\.py['\"]?\s+linear-(?:ask|share)\b", re.I)
+# Best effort: anything that names the Linear API or Meridian's Linear key, once quotes and
+# line continuations are gone. The bridge refuses agent posts itself; a script file still slips through.
+LINEAR_BASH = re.compile(r"api\.linear\.app|local\.meridian\.linear", re.I)
 LINEAR_HELD = ("Linear posts sync to Slack, so Meridian holds every agent write to Linear for your approval. "
                "Check the text before allowing it.")
 TRIGGERS = {"PermissionRequest": "permission", "PermissionDenied": "denied", "Stop": "stop"}
@@ -110,7 +111,7 @@ def after_approval(bridge, key, verdict, tool, stream=None):
 def linear_write(tool, tool_input):
     if tool == "Bash":
         command = tool_input.get("command") if isinstance(tool_input, dict) else tool_input
-        return bool(LINEAR_BASH.search(str(command or "")))
+        return bool(LINEAR_BASH.search(re.sub(r"\\\n|[\\'\"`\s]", "", str(command or ""))))
     parts = tool.split("__")
     # A Linear tool behind another server (mcp__zapier__linear_create_comment) is gated too.
     return (len(parts) >= 3 and parts[0] == "mcp" and "linear" in tool.lower()

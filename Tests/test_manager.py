@@ -729,13 +729,20 @@ class LinearOwnerApprovalTests(Fixture):
                 self.assertEqual(self.held(tool_name=tool, tool_input={"command": "gh pr comment 1 -b hi"}),
                                  manager.NOTHING)
 
-    def test_bash_calls_to_the_linear_api_or_bridge_posts_wait_for_the_owner(self):
+    def test_bash_that_reaches_the_linear_api_or_key_waits_for_the_owner(self):
         for command in ("curl -s https://api.linear.app/graphql -d @body.json",
-                        "python3 streams.py linear-ask mx-1 4", "python3 streams.py linear-share mx-1 pr a b"):
+                        "curl -d @body.json \\\n  https://api.linear.app/graphql",
+                        "curl https://api.lin\"\"ear.app/graphql",
+                        "python3 -c \"import urllib.request as u; u.urlopen('https://API.LINEAR.APP/graphql')\"",
+                        "grep -n api.linear.app Sources/*.py",
+                        "security find-generic-password -s local.meridian.linear -a comments -w"):
             with self.subTest(command=command):
                 self.assert_held(self.held(tool_name="Bash", tool_input={"command": command}))
-        for command in ("python3 streams.py linear-context mx-1", "grep -n 'linear-ask\\|api.linear.app' Sources/*.py",
-                        "git commit -m 'Hold linear-share posts'"):
+
+    def test_other_bash_is_left_alone(self):
+        # The bridge refuses agent posts itself, so its command names need no shell match.
+        for command in ("python3 streams.py linear-context mx-1", "python3 streams.py linear-ask mx-1 4",
+                        "git commit -m 'Hold linear-share posts'", "open https://linear.app/acme/issue/ABC-1"):
             with self.subTest(command=command):
                 self.assertEqual(self.held(tool_name="Bash", tool_input={"command": command}), manager.NOTHING)
 

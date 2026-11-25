@@ -801,6 +801,20 @@ class WorkstreamTerminalsTests(unittest.TestCase):
                                            tool_input={"command": "ls"}))
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
 
+    def test_agents_cannot_post_to_linear_through_the_bridge(self):
+        for action in ("linear-ask", "linear-share"):
+            for name in ("MERIDIAN_TERMINAL", "MERIDIAN_MANAGER"):
+                with self.subTest(action=action, env=name), patch.dict(os.environ, {name: "term-extra"}), \
+                     patch.object(streams.linear, "command") as command:
+                    with self.assertRaisesRegex(ValueError, "Linear"):
+                        streams.main(action, self.parent['id'], "1")
+                    command.assert_not_called()
+
+    def test_terminals_never_receive_the_linear_key(self):
+        with patch.dict(os.environ, LINEAR_API_KEY="lin_api_secret"):
+            env = streams.terminal_environment(MERIDIAN_TERMINAL="t")
+        self.assertNotIn("LINEAR_API_KEY", env)
+
     def test_agent_context_keeps_linear_posts_as_drafts(self):
         context = streams.agent_context(self.parent['id'], "UserPromptSubmit")
         self.assertIn("Linear", context)
