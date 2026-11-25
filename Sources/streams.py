@@ -364,6 +364,7 @@ When marking a task blocked, always record both the specific missing condition a
 Refresh both fields whenever the blocker changes. When resuming, clear them with bd update CHILD -s in_progress --unset-metadata blocked_reason --unset-metadata unblock_action. Do not mark a task blocked merely because an optional check is pending if you can still make progress.
 Close finished children with bd close CHILD --reason "outcome and verification". Before handing back, reconcile the remaining tasks and leave enough notes to resume.
 When you open or change a PR (including pushing commits), or work with a GitHub or Linear issue, register its canonical URL with the workstream by running {link_command} URL. Resolve the PR URL with gh pr view when needed.
+Linear syncs to Slack, so never talk to people on Linear by yourself. Every Linear write (a comment, a reply, an issue edit, a status change or a new issue) is a draft until the user approves its exact text. In Claude Code, make the Linear call with the drafted text: Meridian holds it in a permission prompt, and the user's answer is the approval. In Codex, show the draft in your reply and make the call only after the user approves that text. GitHub comments and replies may be posted directly.
 The user owns completion of the parent. Simple questions can be answered directly.
 In these examples, replace bd with the command prefix above."""
     if event == "SessionStart":
@@ -389,7 +390,17 @@ def interrupted(signum, frame):
 
 def hook(key, sid):
     event = json.load(sys.stdin)
+    # The Linear gate holds in every session this process starts, including one after /clear.
+    try:
+        held = manager.held_for_owner(event)
+    except Exception as error:
+        trace.record(f"linear gate failed type={type(error).__name__}")
+        # Fail closed: a tool call the gate could not judge waits for the owner.
+        held = manager.Outcome(manager.pre_tool("ask", permissionDecisionReason=manager.LINEAR_HELD), None, None) \
+            if event.get("hook_event_name") == "PreToolUse" else None
     if event.get("session_id") != sid:
+        if held is not None and held.output is not None:
+            print(json.dumps(held.output))
         return
     # A hook killed mid-review must still replace the "manager is reviewing" line; unwinding
     # through subprocess.run also kills the consult.
@@ -405,7 +416,7 @@ def hook(key, sid):
                 db.execute('DELETE FROM manager_tools WHERE terminal=?', (key,))
     # First, with no connection open here: a review may consult the manager for minutes.
     try:
-        outcome = manager.review(sys.modules[__name__], key, sid, event)
+        outcome = held if held is not None else manager.review(sys.modules[__name__], key, sid, event)
     except Exception as error:
         trace.record(f"manager review failed type={type(error).__name__}")
         outcome = manager.NOTHING
@@ -627,6 +638,8 @@ def terminal_environment(**extra):
     # A tool shell marks itself non-interactive; a Meridian PTY is an interactive terminal.
     for name in ("NO_COLOR", "CODEX_CI"):
         env.pop(name, None)
+    # Agents never hold the Linear key: their Linear writes go through tools the owner approves.
+    env.pop("LINEAR_API_KEY", None)
     return env
 
 
@@ -917,6 +930,30 @@ def attach_terminal(path):
     os.execvp("dtach", ["dtach", "-a", str(path), "-E", "-z", "-r", "winch"])
 
 
+def executable_path(pid):
+    """The kernel's record of a process's executable, which argv[0] cannot change."""
+    import ctypes
+    try:
+        # The fixed system path: a library search could be steered by the caller's environment.
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        buffer = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+        size = libproc.proc_pidpath(ctypes.c_int(pid), buffer, ctypes.c_uint32(len(buffer)))
+    except (OSError, AttributeError):
+        return ""
+    return buffer.value.decode(errors="replace") if size > 0 else ""
+
+
+def called_by_app():
+    """Whether this process was started directly by this bundle's app, as its buttons do.
+
+    Agents run as the same user and control their own environment and argv, so the check is the
+    parent's executable as the kernel reports it.
+    """
+    app = Path(__file__).resolve().parents[1] / "MacOS" / "Meridian"
+    parent = executable_path(os.getppid())
+    return bool(parent) and Path(parent) == app
+
+
 def main(action, *args):
     if action == "settings":
         import app_settings
@@ -924,6 +961,8 @@ def main(action, *args):
         payload = json.loads(sys.stdin.read(4096)) if verb in ("preferences", "save-linear") else None
         print(json.dumps(app_settings.perform(sys.modules[__name__], verb, payload)))
         return
+    if action in ("linear-ask", "linear-share") and not called_by_app():
+        raise ValueError("Only the owner posts to Linear, from the Meridian app. Draft the text for the owner instead.")
     if action.startswith("linear-"):
         if action in ("linear-poll", "linear-deliver"):
             with database() as db:

@@ -17,6 +17,15 @@ import workstream_log
 Outcome = collections.namedtuple("Outcome", "output state detail")
 NOTHING = Outcome(None, None, None)
 REVIEWED_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan"}
+# Linear syncs to Slack, so an agent's Linear writes are drafts until the owner approves each one.
+# Unknown Linear tools count as writes; only these read prefixes run without the owner.
+LINEAR_READS = ("get_", "list_", "search_", "extract_", "whoami")
+# Best effort: anything that names the Linear API, Meridian's Linear key or the bridge's posting
+# commands, once quotes and line continuations are gone. The bridge also refuses agent terminals, but an
+# agent can clear that marker, so both checks stay. A script file still slips through.
+LINEAR_BASH = re.compile(r"api\.linear\.app|local\.meridian\.linear|linear-(?:ask|share)", re.I)
+LINEAR_HELD = ("Linear posts sync to Slack, so Meridian holds every agent write to Linear for your approval. "
+               "Check the text before allowing it.")
 TRIGGERS = {"PermissionRequest": "permission", "PermissionDenied": "denied", "Stop": "stop"}
 APPROVED = "Approved by Meridian."
 CONTINUING = "Claude is continuing after auto mode blocked an action."
@@ -100,7 +109,34 @@ def after_approval(bridge, key, verdict, tool, stream=None):
         workstream_log.record(f"manager evidence verdict={verdict} failed type={type(exc).__name__}")
 
 
+def linear_write(tool, tool_input):
+    if tool == "Bash":
+        command = tool_input.get("command") if isinstance(tool_input, dict) else tool_input
+        return bool(LINEAR_BASH.search(re.sub(r"\\\n|[\\'\"`\s]", "", str(command or ""))))
+    parts = tool.split("__")
+    # A Linear tool behind another server (mcp__zapier__linear_create_comment) is gated too.
+    return (len(parts) >= 3 and parts[0] == "mcp" and "linear" in tool.lower()
+            and not parts[-1].lower().startswith(LINEAR_READS))
+
+
+def held_for_owner(event):
+    """The owner's gate on Linear writes, decided before and without the manager; None when it does not apply."""
+    name = event.get("hook_event_name")
+    if name not in ("PreToolUse", "PermissionRequest", "PermissionDenied"):
+        return None
+    tool = event.get("tool_name") or ""
+    if not linear_write(tool, event.get("tool_input")):
+        return None
+    if name != "PreToolUse":
+        return NOTHING  # The owner answers the prompt; the manager never approves it.
+    return Outcome(pre_tool("ask", permissionDecisionReason=LINEAR_HELD), "Needs you",
+                   f"Approve or reject the agent's Linear draft ({tool}).")
+
+
 def review(bridge, key, sid, event):
+    held = held_for_owner(event)
+    if held is not None:
+        return status(held, bool(event.get("agent_id")))
     name = event.get("hook_event_name")
     if name == "UserPromptSubmit":
         with transaction(bridge) as db:

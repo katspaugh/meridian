@@ -259,6 +259,23 @@ class CommentTests(Fixture):
             manager.mark_swept(self.bridge, '')
             self.assertFalse(manager.state(self.bridge)['sweepDue'])
 
+    def test_linear_follow_up_asks_for_a_draft_reply(self):
+        url = 'https://linear.app/acme/issue/ABC-1'
+        item = dict(id='linear:c1:now', target=url, url=url + '#comment-c1', author='pm', body='Can you add X?')
+        with self.db() as db:
+            db.execute('INSERT INTO manager_comments(id,payload,plan) VALUES (?,?,?)',
+                       (item['id'], json.dumps(item), json.dumps(dict(action='follow', message='Add X.'))))
+        self.rows[0]['links'] = [dict(url=url)]
+        with patch.object(manager, 'tell', return_value=True) as tell:
+            self.follow()
+        self.assertIn('draft', tell.call_args.args[2].lower())
+        self.assertIn('Comment: ' + item['url'], tell.call_args.args[2])
+
+    def test_github_follow_up_has_no_draft_rule(self):
+        self.seed(); self.linked(); self.plan()
+        with patch.object(manager, 'tell', return_value=True) as tell:
+            self.follow()
+        self.assertNotIn('draft', tell.call_args.args[2].lower())
 
 class ProviderTests(unittest.TestCase):
     def test_github_errors_distinguish_auth_access_network_and_rate_limits(self):
@@ -527,6 +544,7 @@ class ConflictTests(Fixture):
         self.assertEqual(manager.state(self.bridge)['asks'], [])
         self.assertEqual([e[3] for e in self.events()].count('unavailable'), 1, 'reported once, then retried quietly')
         self.assertNotIn('fetch failed', json.dumps(self.events()))
+
 
 
 if __name__ == '__main__':

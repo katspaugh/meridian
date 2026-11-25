@@ -784,6 +784,59 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.assertIn('planned steps', out['hookSpecificOutput']['additionalContext'])
         self.assertEqual(out['hookSpecificOutput']['hookEventName'], 'PostToolUse')
 
+    def test_linear_write_waits_for_the_owner_even_from_another_session(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        event = dict(hook_event_name="PreToolUse", tool_name="mcp__linear__save_comment", tool_input={"body": "Hi"})
+        for sid in ("sid", "after-clear"):
+            with self.subTest(session=sid):
+                out = json.loads(self.run_hook(key, "sid", **dict(event, session_id=sid)))
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.review.assert_not_called()
+        self.assertEqual(self.activity(key)[0], "Needs you")
+
+    def test_linear_gate_failure_still_waits_for_the_owner(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        with patch.object(streams.manager, "held_for_owner", side_effect=RuntimeError):
+            out = json.loads(self.run_hook(key, "sid", hook_event_name="PreToolUse", tool_name="Bash",
+                                           tool_input={"command": "ls"}))
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+
+    def test_only_the_app_can_post_to_linear_through_the_bridge(self):
+        for action in ("linear-ask", "linear-share"):
+            with self.subTest(action=action), patch.object(streams.linear, "command") as command:
+                # The test runner, like an agent's shell, is not the app process.
+                with self.assertRaisesRegex(ValueError, "Linear"):
+                    streams.main(action, self.parent['id'], "1")
+                command.assert_not_called()
+        with patch.object(streams, "called_by_app", return_value=True), \
+             patch("manager_comments.linear_token", return_value="key"), \
+             patch.object(streams.linear, "command", return_value=None) as command:
+            streams.main("linear-ask", self.parent['id'], "1")
+        command.assert_called_once()
+
+    def test_called_by_app_requires_this_bundles_executable_as_parent(self):
+        app = Path(streams.__file__).resolve().parents[1] / "MacOS" / "Meridian"
+        for parent, expected in ((str(app), True), ("/bin/zsh", False), (str(app) + "-copy", False), ("", False)):
+            with self.subTest(parent=parent), patch.object(streams, "executable_path", return_value=parent):
+                self.assertEqual(streams.called_by_app(), expected)
+
+    def test_executable_path_comes_from_the_kernel_not_argv(self):
+        # exec -a would change what ps reports, not the kernel's executable path.
+        child = subprocess.Popen(["/Applications/Meridian.app/Contents/MacOS/Meridian", "5"], executable="/bin/sleep")
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertEqual(streams.executable_path(child.pid), "/bin/sleep")
+
+    def test_terminals_never_receive_the_linear_key(self):
+        with patch.dict(os.environ, LINEAR_API_KEY="lin_api_secret"):
+            env = streams.terminal_environment(MERIDIAN_TERMINAL="t")
+        self.assertNotIn("LINEAR_API_KEY", env)
+
+    def test_agent_context_keeps_linear_posts_as_drafts(self):
+        context = streams.agent_context(self.parent['id'], "UserPromptSubmit")
+        self.assertIn("Linear", context)
+        self.assertIn("draft", context.lower())
+        self.assertIn("GitHub", context)
 
 class WorktreeCreationTests(unittest.TestCase):
     def setUp(self):
@@ -965,6 +1018,7 @@ class WorktreeCreationTests(unittest.TestCase):
         self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
         self.assertEqual(self.git('branch', '--list', 'meridian/*'), '')
         self.assertEqual(list((self.home / 'worktrees').iterdir()), [])
+
 
 
 if __name__ == '__main__':
