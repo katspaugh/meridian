@@ -162,6 +162,13 @@ class ReviewTests(Fixture):
             db.execute('DELETE FROM review_requests')
             self.assertTrue(reviews.review_stream(db, 'w9'))
 
+    def test_owned_rows_from_before_the_stream_table_still_isolate(self):
+        with self.db() as db:
+            db.execute("INSERT INTO review_requests (url,repo,stream,requested,active,owned) VALUES (?,?,'w8','now',1,1)",
+                       (URL, 'via-pt/via-monorepo'))
+            self.assertTrue(reviews.review_stream(db, 'w8'))
+            self.assertFalse(reviews.review_stream(db, 'w1'))
+
     def test_failed_start_is_retried(self):
         self.poll()
         self.github.requested = [URL]

@@ -49,9 +49,13 @@ def initial_prompt(db, stream):
     return row[0] if row else None
 
 
+# Rows written before review_streams existed still count. A read, so initialize opens no transaction.
+STREAMS = "SELECT stream FROM review_streams UNION SELECT stream FROM review_requests WHERE owned=1 AND stream<>''"
+
+
 def review_stream(db, stream):
     """True for a workstream this watcher made: its checkout is someone else's branch."""
-    return db.execute('SELECT 1 FROM review_streams WHERE stream=?', (stream,)).fetchone() is not None
+    return db.execute(f'SELECT 1 FROM ({STREAMS}) WHERE stream=?', (stream,)).fetchone() is not None
 
 
 def first_prompt(url, me):
@@ -113,7 +117,7 @@ def _start(bridge, rows, transaction, url, repo, association, folder, me, now):
                        (url, repo, now))
         return
     with transaction(bridge) as db:
-        owned = {stream for (stream,) in db.execute('SELECT stream FROM review_streams')}
+        owned = {stream for (stream,) in db.execute(STREAMS)}
     matches = comments.matching(rows, url)
     if matches:
         # A previous review workstream or one the user opened: reuse it through the comment inbox,
