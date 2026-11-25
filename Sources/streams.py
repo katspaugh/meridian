@@ -177,14 +177,16 @@ def linked_stream(url):
         return min(matches, key=lambda row: row['state'] == 'Done')['id']
 
 
-def open_github_stream(url, folder, provider, brief=None):
+def open_github_stream(url, folder, provider, brief=None, new_only=False):
+    """Return the workstream for a PR or issue, creating it if none is linked. With new_only, return None
+    instead of an existing workstream, so a caller never mistakes it for one it created."""
     url = links.github_item(url)
     if not url:
         raise ValueError("Paste a GitHub pull request or issue URL.")
     with bridge_lock():
         existing = linked_stream(url)
     if existing:
-        return existing
+        return None if new_only else existing
     _, _, _, owner, repo, kind, number = url.split('/')
     if not folder.strip():
         raise ValueError(f"Choose a local checkout of {owner}/{repo} as the working directory.")
@@ -212,7 +214,10 @@ def open_github_stream(url, folder, provider, brief=None):
     # An automatic opening passes fixed text, so GitHub's body never reaches the agent unasked.
     brief = url + '\n\n' + (brief if brief is not None else item.get('body') or '')
     with bridge_lock():
-        return linked_stream(url) or create_stream(item['title'], folder, url, provider, start_commit=commit, brief=brief)
+        existing = linked_stream(url)
+        if existing:
+            return None if new_only else existing
+        return create_stream(item['title'], folder, url, provider, start_commit=commit, brief=brief)
 
 
 def register_original(db, issue):

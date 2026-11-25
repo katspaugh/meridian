@@ -120,7 +120,8 @@ class ReviewTests(Fixture):
         self.github.requested = [URL]
         self.poll()
         self.poll()
-        self.bridge.open_github_stream.assert_called_once_with(URL, '/checkouts/via-monorepo', 'claude')
+        self.bridge.open_github_stream.assert_called_once_with(URL, '/checkouts/via-monorepo', 'claude',
+                                                               brief=reviews.REVIEW_BRIEF, new_only=True)
         self.assertEqual(self.bridge.launched, ['w9'])
         self.assertEqual(self.request()[:4], ('w9', 1, 1, 0))
         with self.db() as db:
@@ -230,17 +231,33 @@ class ReviewTests(Fixture):
         self.assertIn('refs/pull/7/head', json.loads(plan)['message'])
         self.bridge.bd.assert_not_called()  # The pre-reopen snapshot must not close it again.
 
-    def test_does_not_close_a_workstream_the_user_opened(self):
+    def test_a_workstream_the_user_opened_gets_a_question_not_a_checkout(self):
         self.poll()
         self.rows[0]['links'] = [dict(url=URL)]
         self.github.requested = [URL]
         self.poll()
         self.bridge.open_github_stream.assert_not_called()
-        self.assertEqual(self.request()[:4], ('w1', 1, 0, 0))
+        self.assertEqual(self.request()[:4], ('', 1, 0, 1))
+        self.assertEqual(self.query('SELECT count(*) FROM manager_comments')[0][0], 0)
+        asks = self.query("SELECT stream,recommendation FROM manager_asks WHERE status='open'")
+        self.assertEqual(asks, [('w1', URL)])
+        with self.db() as db:
+            self.assertFalse(reviews.review_stream(db, 'w1'))
         self.rows[0]['state'] = 'Review'
         self.github.state = 'closed'
         self.poll()
         self.bridge.bd.assert_not_called()
+
+    def test_a_workstream_that_appears_during_opening_is_not_adopted(self):
+        self.poll()
+        self.github.requested = [URL]
+        self.bridge.open_github_stream.return_value = None
+        self.poll()
+        self.assertIsNone(self.request())
+        self.assertEqual(self.bridge.launched, [])
+        with self.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM review_streams').fetchone()[0], 0)
+        self.assertEqual(self.setting('comments_error_reviews'), '')
 
     def test_other_pull_request_comments_never_reach_the_review_workstream(self):
         self.started()

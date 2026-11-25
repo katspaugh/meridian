@@ -53,6 +53,9 @@ def initial_prompt(db, stream):
 STREAMS = "SELECT stream FROM review_streams UNION SELECT stream FROM review_requests WHERE owned=1 AND stream<>''"
 
 
+REVIEW_BRIEF = 'Review requested. Meridian opened this workstream to review the pull request.'
+
+
 def review_stream(db, stream):
     """True for a workstream this watcher made: its checkout is someone else's branch."""
     return db.execute(f'SELECT 1 FROM ({STREAMS}) WHERE stream=?', (stream,)).fetchone() is not None
@@ -119,11 +122,21 @@ def _start(bridge, rows, transaction, url, repo, association, folder, me, now):
     with transaction(bridge) as db:
         owned = {stream for (stream,) in db.execute(STREAMS)}
     matches = comments.matching(rows, url)
-    if matches:
-        # A previous review workstream or one the user opened: reuse it through the comment inbox,
-        # which reopens, restarts or prompts its agent. Only a watcher-made workstream is closed later.
-        mine = [row for row in matches if row['id'] in owned]
-        row = mine[0] if mine else comments.choose_stream(matches, {})
+    mine = [row for row in matches if row['id'] in owned]
+    if matches and not mine:
+        # The user's own workstream loads its project settings: never have it check out the PR head
+        # unattended. Leave the decision to the user.
+        with transaction(bridge) as db:
+            store.open_ask(db, matches[0]['id'], '', 'Your review was requested on a pull request that already has '
+                           'a workstream. Ask its agent to review it if you want to.', [], url)
+            db.execute('''INSERT INTO review_requests (url,repo,requested,active,closed) VALUES (?,?,?,1,1)
+                          ON CONFLICT(url) DO UPDATE SET active=1, closed=1, requested=excluded.requested''',
+                       (url, repo, now))
+        return
+    if mine:
+        # A previous review workstream: reuse it through the comment inbox, which reopens, restarts
+        # or prompts its agent. It is already isolated from the branch's project settings.
+        row = mine[0]
         item = dict(id=f'{comments.REVIEW_REQUEST}{repo.casefold()}#{number}:{now}', target=url, url=url,
                     author='', body='Review requested.')
         plan = dict(action='follow', message=repeat_prompt(url, number), stream=row['id'])
@@ -131,10 +144,13 @@ def _start(bridge, rows, transaction, url, repo, association, folder, me, now):
             db.execute('INSERT OR IGNORE INTO manager_comments (id,payload,plan) VALUES (?,?,?)',
                        (item['id'], json.dumps(item), json.dumps(plan)))
             db.execute('''INSERT OR REPLACE INTO review_requests (url,repo,stream,requested,active,owned,closed,prompt)
-                          VALUES (?,?,?,?,1,?,0,NULL)''', (url, repo, row['id'], now, int(row['id'] in owned)))
+                          VALUES (?,?,?,?,1,1,0,NULL)''', (url, repo, row['id'], now))
             store.record_event(db, row['id'], '', 'reviews', 'request', 'Review requested again: ' + url)
         return
-    key = bridge.open_github_stream(url, folder, 'claude')
+    key = bridge.open_github_stream(url, folder, 'claude', brief=REVIEW_BRIEF, new_only=True)
+    if key is None:
+        # A workstream for this PR appeared since the snapshot. The next poll sees it and decides.
+        return
     with transaction(bridge) as db:
         # Save the prompt before launch reads it as the new session's first message.
         db.execute('''INSERT OR REPLACE INTO review_requests (url,repo,stream,requested,active,owned,closed,prompt)

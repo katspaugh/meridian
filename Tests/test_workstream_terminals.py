@@ -870,6 +870,7 @@ class WorktreeCreationTests(unittest.TestCase):
             key = streams.open_github_stream(url + '/files', str(self.repo), 'codex')
         with patch.object(streams, 'run', side_effect=AssertionError('Unexpected second checkout')):
             self.assertEqual(streams.open_github_stream(url.lower() + '?tab=1', '/missing', 'claude'), key)
+            self.assertIsNone(streams.open_github_stream(url, '/missing', 'claude', new_only=True))
         self.assertEqual(len(self.created), 1)
         issue = self.created[0]
         self.assertEqual(issue['title'], item['title'])
