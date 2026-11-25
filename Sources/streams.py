@@ -930,17 +930,27 @@ def attach_terminal(path):
     os.execvp("dtach", ["dtach", "-a", str(path), "-E", "-z", "-r", "winch"])
 
 
+def executable_path(pid):
+    """The kernel's record of a process's executable, which argv[0] cannot change."""
+    import ctypes
+    import ctypes.util
+    try:
+        libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
+        buffer = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+        size = libproc.proc_pidpath(ctypes.c_int(pid), buffer, ctypes.c_uint32(len(buffer)))
+    except (OSError, AttributeError):
+        return ""
+    return buffer.value.decode(errors="replace") if size > 0 else ""
+
+
 def called_by_app():
     """Whether this process was started directly by this bundle's app, as its buttons do.
 
-    Agents run as the same user and control their own environment, so the parent process is the check.
+    Agents run as the same user and control their own environment and argv, so the check is the
+    parent's executable as the kernel reports it.
     """
     app = Path(__file__).resolve().parents[1] / "MacOS" / "Meridian"
-    try:
-        parent = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(os.getppid())],
-                                capture_output=True, text=True, timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return False
+    parent = executable_path(os.getppid())
     return bool(parent) and Path(parent) == app
 
 

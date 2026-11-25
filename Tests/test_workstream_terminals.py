@@ -816,10 +816,16 @@ class WorkstreamTerminalsTests(unittest.TestCase):
 
     def test_called_by_app_requires_this_bundles_executable_as_parent(self):
         app = Path(streams.__file__).resolve().parents[1] / "MacOS" / "Meridian"
-        for parent, expected in ((str(app), True), ("/bin/zsh", False), (str(app) + "-copy", False)):
-            with self.subTest(parent=parent), patch.object(streams.subprocess, "run") as run:
-                run.return_value = subprocess.CompletedProcess([], 0, parent + "\n", "")
+        for parent, expected in ((str(app), True), ("/bin/zsh", False), (str(app) + "-copy", False), ("", False)):
+            with self.subTest(parent=parent), patch.object(streams, "executable_path", return_value=parent):
                 self.assertEqual(streams.called_by_app(), expected)
+
+    def test_executable_path_comes_from_the_kernel_not_argv(self):
+        # exec -a would change what ps reports, not the kernel's executable path.
+        child = subprocess.Popen(["/Applications/Meridian.app/Contents/MacOS/Meridian", "5"], executable="/bin/sleep")
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertEqual(streams.executable_path(child.pid), "/bin/sleep")
 
     def test_terminals_never_receive_the_linear_key(self):
         with patch.dict(os.environ, LINEAR_API_KEY="lin_api_secret"):
