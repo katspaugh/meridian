@@ -801,14 +801,25 @@ class WorkstreamTerminalsTests(unittest.TestCase):
                                            tool_input={"command": "ls"}))
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
 
-    def test_agents_cannot_post_to_linear_through_the_bridge(self):
+    def test_only_the_app_can_post_to_linear_through_the_bridge(self):
         for action in ("linear-ask", "linear-share"):
-            for name in ("MERIDIAN_TERMINAL", "MERIDIAN_MANAGER"):
-                with self.subTest(action=action, env=name), patch.dict(os.environ, {name: "term-extra"}), \
-                     patch.object(streams.linear, "command") as command:
-                    with self.assertRaisesRegex(ValueError, "Linear"):
-                        streams.main(action, self.parent['id'], "1")
-                    command.assert_not_called()
+            with self.subTest(action=action), patch.object(streams.linear, "command") as command:
+                # The test runner, like an agent's shell, is not the app process.
+                with self.assertRaisesRegex(ValueError, "Linear"):
+                    streams.main(action, self.parent['id'], "1")
+                command.assert_not_called()
+        with patch.object(streams, "called_by_app", return_value=True), \
+             patch("manager_comments.linear_token", return_value="key"), \
+             patch.object(streams.linear, "command", return_value=None) as command:
+            streams.main("linear-ask", self.parent['id'], "1")
+        command.assert_called_once()
+
+    def test_called_by_app_requires_this_bundles_executable_as_parent(self):
+        app = Path(streams.__file__).resolve().parents[1] / "MacOS" / "Meridian"
+        for parent, expected in ((str(app), True), ("/bin/zsh", False), (str(app) + "-copy", False)):
+            with self.subTest(parent=parent), patch.object(streams.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, parent + "\n", "")
+                self.assertEqual(streams.called_by_app(), expected)
 
     def test_terminals_never_receive_the_linear_key(self):
         with patch.dict(os.environ, LINEAR_API_KEY="lin_api_secret"):

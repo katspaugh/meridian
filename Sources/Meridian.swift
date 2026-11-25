@@ -145,15 +145,10 @@ enum Bridge {
             let traced = traceRefresh || ["create", "open", "view-agent"].contains(action)
             let stream = ["open", "view-agent"].contains(action) ? args[1] : "-"
             let context = "action=\(action) stream=\(stream)"
-            // The app may have been relaunched from an agent's shell; its bridge calls act for the owner.
-            var environment = ProcessInfo.processInfo.environment
-            environment["MERIDIAN_TERMINAL"] = nil
-            environment["MERIDIAN_MANAGER"] = nil
             if traced {
                 WorkstreamLog.record("\(context) spawning bridge")
-                environment["MERIDIAN_TRACE_REFRESH"] = "1"
+                p.environment = ProcessInfo.processInfo.environment.merging(["MERIDIAN_TRACE_REFRESH": "1"]) { _, new in new }
             }
-            p.environment = environment
             p.standardOutput = output
             if input != nil { p.standardInput = stdin }
             let errors = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
