@@ -410,7 +410,7 @@ def state(bridge):
     result["sweepDue"] = bool(not result["paused"] and (comment_due or (active and elapsed >= SWEEP_INTERVAL
                               and ((due and due != swept) or elapsed >= 3600))))
     with transaction(bridge) as db:
-        result["commentErrors"] = list(dict.fromkeys(value for name in ("github", "conflicts", "linear")
+        result["commentErrors"] = list(dict.fromkeys(value for name in ("github", "conflicts", "linear", "reviews")
                                                      for value in [store.setting(db, "comments_error_" + name)] if value))
     result["briefingStale"] = briefed != overall_signature(rows)
     return result

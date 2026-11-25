@@ -31,6 +31,7 @@ import codex_session
 import pipeline_tracker as tracker
 import manager
 import manager_store
+import manager_reviews
 
 import meridian_paths
 
@@ -860,6 +861,10 @@ def launch(key):
             db.execute("INSERT OR REPLACE INTO activity VALUES (?,?,?,?,?)",
                        (key, sid, "Ready", "Opening Claude Code.", old[1] if resume else None))
         args = [claude, "--resume" if resume else "--session-id", sid, "--settings", settings(key, sid)]
+        with database() as db:
+            if manager_reviews.review_stream(db, issue["id"]):
+                # A review checkout is the PR author's branch: never load its project settings or hooks.
+                args += ["--setting-sources", "user"]
         view_dir = ROOT / "views" / sid
         view_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         env["MERIDIAN_VIEW_DIR"] = str(view_dir)
@@ -877,7 +882,7 @@ def launch(key):
         args.extend(["--plugin-dir", str(plugin)])
         if not resume and key == issue["id"]:
             with database() as db:
-                prompt = linear.initial_prompt(db, key)
+                prompt = linear.initial_prompt(db, key) or manager_reviews.initial_prompt(db, key)
             if prompt:
                 args.append(prompt)
         env.pop("TMUX", None)

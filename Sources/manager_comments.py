@@ -9,6 +9,7 @@ import subprocess
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
+import manager_brain as brain
 import manager_store as store
 import workstream_links as links
 
@@ -49,6 +50,7 @@ def github_error(exc):
     return GitHubFailure.MESSAGES['request']
 
 
+REVIEW_REQUEST = 'github:review-request:'
 LINEAR = re.compile(r'https://linear\.app/(?:[\w-]+/)?issue/([a-z][a-z0-9]*-\d+)', re.I)
 
 
@@ -191,13 +193,24 @@ def poll_conflicts(bridge, rows, transaction):
         store.set_setting(db, 'comments_error_conflicts', '')
 
 
-def github(rows, since):
+def repositories(root):
+    """Casefolded owner/name slugs that GitHub watching is limited to, or None to watch every repository."""
+    value = brain.config(root).get('github_repositories')
+    if not isinstance(value, list):
+        return None
+    return {item.strip().casefold() for item in value if isinstance(item, str) and item.strip()}
+
+
+def github(rows, since, scope=None):
+    def watched(repo):
+        return scope is None or repo.casefold() in scope
+
     me = gh('user')['login']
     targets = {}
     for row in rows:
         for link in row.get('links') or []:
             match = GITHUB.match(link.get('url', ''))
-            if match:
+            if match and watched(match[1]):
                 targets[(match[1], match[3])] = match[2] == 'pull'
     # Read notifications as well as saved links, so unmatched work can reach the boss.
     failures = []
@@ -209,7 +222,7 @@ def github(rows, since):
     for notification in notifications:
         subject = notification.get('subject') or {}
         match = re.fullmatch(r'https://api.github.com/repos/([\w.-]+/[\w.-]+)/(issues|pulls)/(\d+)', subject.get('url') or '')
-        if match:
+        if match and watched(match[1]):
             targets[(match[1], match[3])] = match[2] == 'pulls'
     found = []
     for (repo, number), pull in targets.items():
@@ -302,7 +315,8 @@ def linear(rows, since):
 
 def poll(bridge, rows, transaction):
     """Advance a provider checkpoint only after its complete response is stored."""
-    for name, fetch in (('github', github), ('linear', linear)):
+    scope = repositories(bridge.ROOT)
+    for name, fetch in (('github', lambda rows, since: github(rows, since, scope)), ('linear', linear)):
         key, now = 'comments_since_' + name, stamp()
         with transaction(bridge) as db:
             since = store.setting(db, key)
@@ -428,6 +442,14 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
             return
         recover_ambiguous(db)
         coalesce_pending(db)
+        # Review workstreams take only their review requests: other discussion on the PR must not
+        # reopen them or have their agent answer on the user's behalf.
+        reviews = {stream for (stream,) in db.execute("SELECT stream FROM review_requests WHERE owned=1 AND stream<>''")}
+        for key, payload in db.execute('SELECT id,payload FROM manager_comments WHERE done=0').fetchall():
+            found = matching(rows, json.loads(payload)['target'])
+            if (not key.startswith(REVIEW_REQUEST) and found
+                    and all(row['id'] in reviews for row in found)):
+                db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
         pending = db.execute('SELECT id,payload,plan FROM manager_comments WHERE done=0 ORDER BY rowid LIMIT 20').fetchall()
     unplanned = [json.loads(payload) for _, payload, plan in pending if not plan]
     plans = {}
@@ -450,6 +472,8 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
     for key, payload, saved_plan in pending:
         item = json.loads(payload)
         matches = matching(rows, item['target'])
+        if not key.startswith(REVIEW_REQUEST):
+            matches = [row for row in matches if row['id'] not in reviews]
         plan = json.loads(saved_plan) if saved_plan else plans.get(key)
         if plan is None:
             continue
@@ -544,4 +568,6 @@ def watch(bridge, rows, transaction, brain, untrusted, act_one, exclude=None):
         # Deliver already classified feedback before slow network requests or model calls.
         follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude, classify=False)
         poll(bridge, rows, transaction)
+        import manager_reviews  # Imports this module; a top-level import would be circular.
+        manager_reviews.poll(bridge, rows, transaction)
         follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude)

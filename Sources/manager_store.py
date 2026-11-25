@@ -12,7 +12,9 @@ MAX_NUDGES = 3
 
 def initialize(db):
     import manager_comments
+    import manager_reviews
     manager_comments.initialize(db)
+    manager_reviews.initialize(db)
     db.execute("""CREATE TABLE IF NOT EXISTS manager_events (id INTEGER PRIMARY KEY AUTOINCREMENT, time REAL,
                stream TEXT, terminal TEXT, trigger TEXT, verdict TEXT, summary TEXT, detail TEXT, seen INTEGER DEFAULT 0)""")
     db.execute("""CREATE TABLE IF NOT EXISTS manager_asks (id INTEGER PRIMARY KEY AUTOINCREMENT, time REAL,

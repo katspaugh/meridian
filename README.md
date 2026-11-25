@@ -61,6 +61,19 @@ Linear monitoring uses the macOS Keychain generic password with service `local.m
 
 The first poll establishes a baseline rather than replaying historical discussions. Subsequent checkpoints and queued feedback survive app restarts; failed requests retain their checkpoint for retry. Turn off **Watch Linear and GitHub comments** in Settings to disable comment watching while keeping other soul behavior. Settings override the legacy `watch_comments` value in `manager/config.json`. Pausing the soul also pauses watching and delivery.
 
+To limit GitHub watching to some repositories, list them in `manager/config.json` under Meridian's data folder. Without the key, Meridian watches every repository. An empty list watches none.
+
+```json
+{
+  "github_repositories": ["owner/repo"],
+  "review_requests": {"owner/repo": "/path/to/local/checkout"}
+}
+```
+
+## Review requests
+
+For each repository in `review_requests` that is also in scope, Meridian checks open PRs that request your review directly. Requests to your teams are skipped. A new request opens a workstream from the local checkout at the PR head. This happens only when the author is an owner, member or collaborator and the branch is in the same repository. Other requests appear as a Manager question with the link. The review agent loads only your user Claude settings, never the project settings or hooks from the PR branch. Its Claude agent is told to submit one review with the COMMENT event and inline comments. The agent must never approve, request changes, merge or push. The agent posts with your `gh` account, so approve its permission prompt if one appears. Meridian closes the workstream when your review appears on GitHub or the PR closes, once the agent has finished its turn. It never closes a workstream you opened yourself. Other comments on that PR never reach the review workstream, so its agent does not reply on your behalf. A repeat request reopens the earlier review workstream and asks for a review of the latest head. The first check records existing requests without starting work. Review watching shares the comment-watching setting and the soul's pause.
+
 ## Working from Linear
 
 Open **Settings** (⌘,) and save a personal Linear API key in macOS Keychain. Give the key read access to the teams you work with. Posting questions requires comment creation, and sharing review attachments requires write access.
