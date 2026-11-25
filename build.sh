@@ -32,4 +32,6 @@ cat > "$contents/Info.plist" <<'PLIST'
 <key>CFBundleVersion</key><string>1</string>
 </dict></plist>
 PLIST
-codesign --force --sign - build/Meridian.app
+# Ad-hoc signatures change on every build, so macOS forgets folder permissions each time.
+# Set MERIDIAN_SIGN_IDENTITY (for example "Apple Development") to keep them across rebuilds.
+codesign --force --sign "${MERIDIAN_SIGN_IDENTITY:--}" build/Meridian.app
