@@ -933,9 +933,9 @@ def attach_terminal(path):
 def executable_path(pid):
     """The kernel's record of a process's executable, which argv[0] cannot change."""
     import ctypes
-    import ctypes.util
     try:
-        libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
+        # The fixed system path: a library search could be steered by the caller's environment.
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         buffer = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
         size = libproc.proc_pidpath(ctypes.c_int(pid), buffer, ctypes.c_uint32(len(buffer)))
     except (OSError, AttributeError):
