@@ -393,6 +393,14 @@ class ConflictTests(Fixture):
         self.assertIn('author:@me', query.call_args.args[0])
         self.assertEqual(query.call_args.args[1], dict(after='next'))
 
+    def test_conflicts_outside_the_watched_repositories_are_skipped(self):
+        with patch.object(comments, 'graphql', side_effect=[page(node(), node(repo='x/y', number=7))]):
+            items, _ = comments.conflicts({'x/y'})
+        self.assertEqual([i['id'] for i in items], ['github:conflict:x/y#7:' + SHA])
+        with patch.object(manager.brain, 'config', return_value=dict(github_repositories=['x/y'])):
+            self.poll(page(node()))
+        self.assertEqual(self.pending(), [])
+
     def test_poll_stores_once_and_drops_conflicts_that_cleared(self):
         self.poll(page(node()), page(node()))
         self.assertEqual(self.pending(), ['github:conflict:o/r#12:' + SHA])

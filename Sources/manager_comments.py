@@ -144,7 +144,7 @@ CONFLICT_MESSAGE = ('The pull request linked below has merge conflicts with its 
                     'worktree is not on that head branch, do not switch away from or discard work in progress here.')
 
 
-def conflicts():
+def conflicts(scope=None):
     """Return conflicting authored PRs as inbox items, and the PRs whose mergeability GitHub has not computed."""
     items, unknown, after = [], set(), None
     for _ in range(CONFLICT_PAGES):
@@ -153,6 +153,8 @@ def conflicts():
             repo = ((pull or {}).get('repository') or {}).get('nameWithOwner') or ''
             number, sha = pull.get('number') if pull else None, (pull or {}).get('headRefOid') or ''
             if not (re.fullmatch(r'[\w.-]+/[\w.-]+', repo) and type(number) is int and number > 0):
+                continue
+            if scope is not None and repo.casefold() not in scope:
                 continue
             key = f'github:conflict:{repo.lower()}#{number}'
             if pull.get('mergeable') == 'UNKNOWN':
@@ -173,7 +175,7 @@ def conflicts():
 def poll_conflicts(bridge, rows, transaction):
     """Queue each conflicting head once, and drop queued conflicts that have since cleared."""
     try:
-        items, unknown = conflicts()
+        items, unknown = conflicts(repositories(bridge.ROOT))
     except Exception as exc:
         message = github_error(exc)
         with transaction(bridge) as db:
