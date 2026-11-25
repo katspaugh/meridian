@@ -93,6 +93,52 @@ class ManagerBrainTests(unittest.TestCase):
         self.assertIsNone(brain.consult(self.root, "permission", "CONTEXT"))
         self.run.assert_not_called()
 
+    def limited(self, model="Fable", extra=""):
+        return Mock(returncode=1, stdout=json.dumps({
+            "is_error": True, "api_error_status": 429, "api_error_type": "rate_limit_error",
+            "api_error": "usage_limit_reached", "credential_expires_at": "2026-12-10T18:36:25.779Z",
+            "result": f"You've hit your {model} limit \u00b7 resets 12pm (Europe/Berlin).{extra}"}))
+
+    def models(self):
+        return [call.args[0][call.args[0].index("--model") + 1] for call in self.run.call_args_list]
+
+    def test_usage_limit_retries_once_with_the_fallback_model(self):
+        self.run.side_effect = [self.limited(), reply({"verdict": "allow", "summary": "Fine.", "message": ""})]
+        self.assertEqual(brain.consult(self.root, "permission", "CONTEXT")["verdict"], "allow")
+        self.assertEqual(self.models(), ["fable", "opus"])
+        self.assertEqual(brain.consult_error(self.root), "")
+
+    def test_fallback_model_is_configurable_and_never_repeats_the_same_model(self):
+        (self.root / "manager").mkdir()
+        (self.root / "manager" / "config.json").write_text('{"model": "opus", "fallback_model": "opus"}')
+        self.run.return_value = self.limited("Opus")
+        self.assertIsNone(brain.consult(self.root, "permission", "CONTEXT"))
+        self.assertEqual(self.models(), ["opus"])
+        (self.root / "manager" / "config.json").write_text('{"fallback_model": "sonnet"}')
+        self.run.reset_mock()
+        brain.consult(self.root, "permission", "CONTEXT")
+        self.assertEqual(self.models(), ["fable", "sonnet"])
+
+    def test_limit_failure_is_surfaced_with_its_message_but_never_credentials(self):
+        self.run.side_effect = [self.limited(extra=" key sk-ant-api03-abcdefghijklmnop"), self.limited("Opus")]
+        self.assertIsNone(brain.consult(self.root, "sweep", "CONTEXT"))
+        error = brain.consult_error(self.root)
+        self.assertIn("You've hit your Fable limit", error)
+        self.assertIn("You've hit your Opus limit", error)
+        self.assertNotIn("sk-ant", error)
+        self.assertNotIn("credential_expires_at", error)
+        self.assertNotIn("2026-12-10", error)
+
+    def test_other_failures_are_surfaced_without_retrying_and_success_clears_them(self):
+        self.run.return_value = Mock(returncode=1, stdout="", stderr="token=SECRET")
+        self.assertIsNone(brain.consult(self.root, "permission", "CONTEXT"))
+        self.assertEqual(self.run.call_count, 1)
+        self.assertIn("exit status 1", brain.consult_error(self.root))
+        self.assertNotIn("SECRET", brain.consult_error(self.root))
+        self.run.return_value = reply({"verdict": "allow", "summary": "Fine.", "message": ""})
+        brain.consult(self.root, "permission", "CONTEXT")
+        self.assertEqual(brain.consult_error(self.root), "")
+
     def test_unknown_trigger_returns_none(self):
         self.assertIsNone(brain.consult(self.root, "nonsense", "CONTEXT"))
         self.run.assert_not_called()
@@ -124,18 +170,18 @@ class ManagerBrainTests(unittest.TestCase):
     def test_config_override(self):
         (self.root / "manager").mkdir()
         (self.root / "manager/config.json").write_text(json.dumps({"model": "opus", "effort": "max"}))
-        self.assertEqual(brain.config(self.root), {"model": "opus", "effort": "max"})
+        self.assertEqual(brain.config(self.root), {"model": "opus", "fallback_model": "opus", "effort": "max"})
         brain.consult(self.root, "plan", "CONTEXT")
         args = self.args()
         self.assertEqual(args[args.index("--model") + 1], "opus")
         self.assertEqual(args[args.index("--effort") + 1], "max")
 
     def test_config_ignores_bad_files(self):
-        self.assertEqual(brain.config(self.root), {"model": "fable", "effort": "high"})
+        self.assertEqual(brain.config(self.root), {"model": "fable", "fallback_model": "opus", "effort": "high"})
         (self.root / "manager").mkdir()
         for text in ("not json", "[1, 2]"):
             (self.root / "manager/config.json").write_text(text)
-            self.assertEqual(brain.config(self.root), {"model": "fable", "effort": "high"})
+            self.assertEqual(brain.config(self.root), {"model": "fable", "fallback_model": "opus", "effort": "high"})
 
     def test_remember_then_notes_round_trips_into_the_prompt(self):
         self.assertEqual(brain.notes(self.root), "")

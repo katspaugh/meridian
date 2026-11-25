@@ -425,6 +425,12 @@ class ConflictTests(Fixture):
         self.poll(page())
         self.assertEqual(self.setting('comments_error_conflicts'), '')
 
+    def test_consult_failures_are_listed_with_monitoring_errors(self):
+        manager.brain.set_consult_error(self.root, "Meridian's Claude reviews hit a usage limit.")
+        self.assertEqual(manager.state(self.bridge)['commentErrors'], ["Meridian's Claude reviews hit a usage limit."])
+        manager.brain.set_consult_error(self.root, '')
+        self.assertEqual(manager.state(self.bridge)['commentErrors'], [])
+
     def test_linked_conflict_is_delivered_with_its_pr_without_a_model_call(self):
         self.rows[0]['links'] = [dict(url=PR)]
         self.poll(page(node()))
@@ -433,6 +439,19 @@ class ConflictTests(Fixture):
         self.assertIn(b'PR: ' + PR.encode(), self.typed()[0])
         self.assertNotIn(b'Comment:', self.typed()[0])
         self.assertEqual(self.pending(), [])
+
+    def test_planned_conflicts_deliver_behind_a_backlog_that_cannot_be_classified(self):
+        self.rows[0]['links'] = [dict(url=PR)]
+        with self.db() as db:
+            for n in range(25):
+                item = dict(id=f'github:comment:{n}:now', target='https://github.com/o/r/pull/99', url='u', author='a', body='b')
+                db.execute('INSERT INTO manager_comments(id,payload) VALUES (?,?)', (item['id'], json.dumps(item)))
+        self.poll(page(node()))
+        self.consult.return_value = None  # Every classification fails, as when the model is out of usage.
+        self.follow()
+        self.assertIn(b'PR: ' + PR.encode(), self.typed()[0])
+        self.assertNotIn('github:conflict:o/r#12:' + SHA, self.pending())
+        self.assertEqual(len(self.pending()), 25)
 
     def test_new_head_replaces_the_pending_conflict(self):
         self.rows[0]['links'] = [dict(url=PR)]

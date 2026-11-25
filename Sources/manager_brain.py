@@ -1,6 +1,9 @@
 """Asks Claude, run headless and read-only, for a structured verdict. Any failure yields None."""
 import json
 import os
+import re
+import time
+import unicodedata
 from pathlib import Path
 import shutil
 import subprocess
@@ -52,7 +55,7 @@ def _manager(root):
 
 
 def config(root):
-    result = {"model": "fable", "effort": "high"}
+    result = {"model": "fable", "fallback_model": "opus", "effort": "high"}
     try:
         override = json.loads((_manager(root) / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -107,13 +110,13 @@ def _environment(root):
     return env
 
 
-def _command(claude, root, trigger, investigate, session, resume, folders):
+def _command(claude, root, trigger, investigate, session, resume, folders, model=None):
     settings = config(root)
     tools = TOOLS + (INVESTIGATE_TOOLS if investigate else [])
     rules = [t for t in tools if t != "Bash"] + (INVESTIGATE_RULES if investigate else [])
     prompt = ROLE.read_text(encoding="utf-8").rstrip("\n") + "\n\n# Your notes\n" + notes(root)
     # The consult's folder has no project settings, so the boss's own permission rules cannot widen its tools.
-    args = [claude, "-p", "--safe-mode", "--setting-sources", "project", "--model", str(settings["model"]), "--effort", str(settings["effort"]),
+    args = [claude, "-p", "--safe-mode", "--setting-sources", "project", "--model", str(model or settings["model"]), "--effort", str(settings["effort"]),
             "--output-format", "json", "--json-schema", json.dumps(schema(trigger)),
             "--system-prompt", prompt, "--tools", ",".join(tools), "--allowedTools", *rules,
             "--permission-mode", "dontAsk"]
@@ -129,6 +132,69 @@ def _command(claude, root, trigger, investigate, session, resume, folders):
     return args
 
 
+STATUS = "consult_status.json"
+LIMIT = re.compile(r"hit your .{0,40}limit|usage limit", re.I)
+# Claude's own error text is shown to the boss; anything shaped like a credential is not.
+SECRET = re.compile(r"\b(?:sk-ant-[\w-]+|sk-[\w-]{16,}|[A-Za-z0-9_\-]{40,})|[?&][^\s]*(?:token|key|secret)=[^\s&]+", re.I)
+
+
+def _shown(text, limit=240):
+    text = "".join(c if unicodedata.category(c)[0] != "C" else " " for c in str(text))
+    text = " ".join(SECRET.sub("[redacted]", text).split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def set_consult_error(root, message):
+    """The latest consult failure, for the app's monitoring errors. An empty message clears it."""
+    try:
+        folder = _manager(root)
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / (STATUS + ".tmp")
+        temporary.write_text(json.dumps({"error": message, "time": time.time()}), encoding="utf-8")
+        os.replace(temporary, folder / STATUS)
+    except OSError as exc:
+        workstream_log.record(f"manager consult status failed type={type(exc).__name__}")
+
+
+def consult_error(root):
+    try:
+        value = json.loads((_manager(root) / STATUS).read_text(encoding="utf-8")).get("error")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def _attempt(args, context, timeout, cwd, root, required):
+    """Returns (output, failure). A failure carries a log kind, the text shown to the boss and whether it is a usage limit."""
+    def fail(kind, shown=None, limit=False):
+        return None, dict(kind=kind, shown=shown or kind.replace("-", " "), limit=limit)
+
+    try:
+        p = subprocess.run(args, input=context, capture_output=True, text=True, encoding="utf-8", timeout=timeout,
+                           cwd=str(cwd), env=_environment(root))
+    except subprocess.TimeoutExpired:
+        return fail("timeout", "it timed out")
+    except Exception as exc:
+        return fail(f"error type={type(exc).__name__}", "Claude Code could not be started")
+    # Claude prints its JSON result even when it exits with an error; stderr is never read.
+    try:
+        reply = json.loads(p.stdout)
+    except (TypeError, ValueError):
+        reply = None
+    if isinstance(reply, dict) and reply.get("is_error") is True:
+        text = reply.get("result") if isinstance(reply.get("result"), str) else ""
+        limit = reply.get("api_error") == "usage_limit_reached" or bool(LIMIT.search(text))
+        return fail("usage-limit" if limit else "is-error", _shown(text) or "Claude reported an error", limit)
+    if p.returncode != 0:
+        return fail(f"exit status={p.returncode}", f"exit status {p.returncode}")
+    if not isinstance(reply, dict):
+        return fail("unparsed", "its reply could not be read")
+    output = reply.get("structured_output")
+    if not isinstance(output, dict) or any(key not in output for key in required):
+        return fail("incomplete", "its reply was incomplete")
+    return output, None
+
+
 def consult(root, trigger, context, investigate=False, timeout=150, session=None, resume=False, folders=()):
     def fail(kind):
         workstream_log.record(f"manager consult trigger={trigger} failed kind={kind}")
@@ -136,28 +202,37 @@ def consult(root, trigger, context, investigate=False, timeout=150, session=None
     try:
         claude = shutil.which("claude")
         if claude is None:
+            set_consult_error(root, "Meridian could not consult Claude: Claude Code is not installed.")
             return fail("missing-claude")
-        args = _command(claude, root, trigger, investigate, session, resume, folders)
+        settings = config(root)
         required = schema(trigger)["required"]
         cwd = _manager(root)
         cwd.mkdir(parents=True, exist_ok=True)
-        p = subprocess.run(args, input=context, capture_output=True, text=True, encoding="utf-8", timeout=timeout,
-                           cwd=str(cwd), env=_environment(root))
-    except subprocess.TimeoutExpired:
-        return fail("timeout")
+        models = [str(settings["model"])]
+        fallback = settings.get("fallback_model")
+        if isinstance(fallback, str) and fallback.strip() and fallback.strip() != models[0]:
+            models.append(fallback.strip())
+        failures = []
+        for index, model in enumerate(models):
+            args = _command(claude, root, trigger, investigate, session, resume, folders, model)
+            output, failure = _attempt(args, context, timeout, cwd, root, required)
+            if failure is None:
+                if index:
+                    workstream_log.record(f"manager consult trigger={trigger} used fallback model")
+                set_consult_error(root, "")
+                return output
+            fail(failure["kind"] + (" model=fallback" if index else ""))
+            failures.append(dict(failure, model=_shown(model, 40)))
+            if not failure["limit"]:
+                break  # Only a usage limit is worth another model; other failures would fail the same way.
     except Exception as exc:
+        set_consult_error(root, "Meridian could not consult Claude. Check that Claude Code is signed in.")
         return fail(f"error type={type(exc).__name__}")
-    if p.returncode != 0:
-        return fail(f"exit status={p.returncode}")
-    try:
-        reply = json.loads(p.stdout)
-    except (TypeError, ValueError):
-        return fail("unparsed")
-    if not isinstance(reply, dict):
-        return fail("unparsed")
-    if reply.get("is_error") is True:
-        return fail("is-error")
-    output = reply.get("structured_output")
-    if not isinstance(output, dict) or any(key not in output for key in required):
-        return fail("incomplete")
-    return output
+    if failures[0]["limit"]:
+        detail = " ".join(f"{f['model']}: {f['shown']}" for f in failures)
+        set_consult_error(root, "Meridian's Claude reviews hit a usage limit: " + detail
+                          + ("" if len(failures) > 1 else " Set fallback_model in manager/config.json to keep working."))
+    else:
+        set_consult_error(root, "Meridian's Claude reviews are failing (" + failures[-1]["shown"]
+                          + "). Check that Claude Code is signed in.")
+    return None

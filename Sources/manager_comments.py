@@ -453,7 +453,11 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
             if (not key.startswith(REVIEW_REQUEST) and found
                     and all(row['id'] in reviews for row in found)):
                 db.execute('UPDATE manager_comments SET done=1 WHERE id=?', (key,))
-        pending = db.execute('SELECT id,payload,plan FROM manager_comments WHERE done=0 ORDER BY rowid LIMIT 20').fetchall()
+        # Planned items need no model, so an unclassifiable backlog never holds them back.
+        pending = (db.execute('SELECT id,payload,plan FROM manager_comments WHERE done=0 AND plan IS NOT NULL '
+                              'ORDER BY rowid LIMIT 20').fetchall()
+                   + db.execute('SELECT id,payload,plan FROM manager_comments WHERE done=0 AND plan IS NULL '
+                                'ORDER BY rowid LIMIT 20').fetchall())
     unplanned = [json.loads(payload) for _, payload, plan in pending if not plan]
     plans = {}
     if unplanned and classify:
