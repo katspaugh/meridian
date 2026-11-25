@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -174,18 +175,195 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         for provider in streams.PROVIDERS:
             with self.subTest(provider=provider):
                 key = self.register(key="color-" + provider, provider=provider)
-                with patch.dict(os.environ, NO_COLOR="1"), \
+                with patch.dict(os.environ, NO_COLOR="1", CODEX_CI="1"), \
                      patch.object(streams.shutil, "which", side_effect=lambda name: "/bin/" + name), \
                      patch.object(streams.shutil, "copyfile"), patch.object(streams, "run") as run:
                     streams.launch(key)
                 env = run.call_args.kwargs['env']
                 self.assertIsNone(env.get('NO_COLOR'))
+                self.assertIsNone(env.get('CODEX_CI'))
                 self.assertEqual(env['COLORTERM'], 'truecolor')
-        with patch.dict(os.environ, NO_COLOR="1"), patch.object(streams, "terminals", return_value=[]), \
+        with patch.dict(os.environ, NO_COLOR="1", CODEX_CI="1"), patch.object(streams, "terminals", return_value=[]), \
              patch.object(streams.shutil, "which", side_effect=lambda name: "/bin/" + name), \
              patch.object(streams, "run") as run:
             streams.manager_terminal()
         self.assertIsNone(run.call_args.kwargs['env'].get('NO_COLOR'))
+        self.assertIsNone(run.call_args.kwargs['env'].get('CODEX_CI'))
+
+    def transcript(self, *entries, age=60):
+        path = self.root / ("transcript-%d.jsonl" % len(list(self.root.glob("transcript-*"))))
+        path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def finished_transcript(self, age=60):
+        return self.transcript({"type": "user", "message": {"role": "user", "content": "hi"}},
+                               {"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn"}},
+                               {"type": "system", "subtype": "turn_duration"}, age=age)
+
+    def claude_terminal(self, key="term-claude", state="Review", transcript=None, sid="claude-session"):
+        self.register(key=key, provider="claude", state=state, sid=sid)
+        transcript = self.finished_transcript() if transcript is None else transcript
+        with streams.database() as db:
+            db.execute("UPDATE activity SET transcript=? WHERE id=?", (str(transcript) if transcript else None, key))
+        sockets = self.root / "sockets"
+        sockets.mkdir(mode=0o700, exist_ok=True)
+        (sockets / key).touch()
+        return key
+
+    def refresh(self, key, no_color=True):
+        """Run refresh_terminal() without touching real processes."""
+        processes = ([4001], {4001: 0, 4002: 1, 4003: 2, 4004: 3})
+        with patch.object(streams.Path, "is_socket", lambda path: path.name == key), \
+             patch.object(streams, "session_processes", return_value=processes), \
+             patch.object(streams, "inherited_no_color", return_value=no_color), \
+             patch.object(streams.os, "kill") as kill, patch.object(streams, "process_alive", return_value=False), \
+             patch.object(streams.shutil, "which", side_effect=lambda name: "/bin/" + name), \
+             patch.object(streams.shutil, "copyfile"), patch.object(streams, "run") as run:
+            restarted = streams.refresh_terminal(key)
+        return restarted, kill, run
+
+    def test_idle_session_without_colors_resumes_the_same_conversation(self):
+        key = self.claude_terminal()
+        restarted, kill, run = self.refresh(key)
+        self.assertTrue(restarted)
+        kill.assert_called_once_with(4001, streams.signal.SIGTERM)
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index("--resume") + 1], "claude-session")
+        self.assertIn(str(streams.TERMINALS / key), args)
+        with streams.database() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM closed_terminals WHERE id=?", (key,)).fetchone())
+            self.assertEqual(db.execute("SELECT provider FROM workstream_terminals WHERE id=?", (key,)).fetchone(), ("claude",))
+            self.assertEqual(db.execute("SELECT session FROM activity WHERE id=?", (key,)).fetchone(), ("claude-session",))
+        # The replacement session starts clean, so the next attach leaves it alone.
+        restarted, kill, run = self.refresh(key, no_color=False)
+        self.assertFalse(restarted)
+        kill.assert_not_called()
+        run.assert_not_called()
+
+    def test_codex_session_without_colors_resumes_its_thread(self):
+        key = self.register(key="term-codex", provider="codex", state="Review", sid="thread-1")
+        (self.root / "sockets").mkdir(mode=0o700, exist_ok=True)
+        restarted, kill, run = self.refresh(key)
+        self.assertTrue(restarted)
+        self.assertEqual(run.call_args.args[0][-2:], ["codex-run", key])
+        with streams.database() as db:
+            self.assertEqual(db.execute("SELECT session FROM activity WHERE id=?", (key,)).fetchone(), ("thread-1",))
+
+    def test_busy_or_unresumable_sessions_are_never_restarted(self):
+        cases = {
+            "working": dict(state="Working"),
+            "needs you": dict(state="Needs you"),
+            "no transcript": dict(transcript=False),
+            "mid tool call": dict(transcript=self.transcript(
+                {"type": "assistant", "message": {"role": "assistant", "stop_reason": "tool_use"}})),
+            "still writing": dict(transcript=self.finished_transcript(age=0)),
+            "subagent working": dict(),
+            "colors already work": dict(),
+        }
+        for name, options in cases.items():
+            with self.subTest(name):
+                key = self.claude_terminal(key="term-" + name.replace(" ", "-"), **options)
+                if name == "subagent working":
+                    with streams.database() as db:
+                        db.execute("INSERT INTO agents VALUES (?,?,?,?,?,?,?)",
+                                   (key, "claude-session", "agent-1", "Explore", "Working", None, None))
+                restarted, kill, run = self.refresh(key, no_color=name != "colors already work")
+                self.assertFalse(restarted)
+                kill.assert_not_called()
+                run.assert_not_called()
+        shell = self.register(key="term-shell", provider="shell", state="Ready")
+        restarted, kill, run = self.refresh(shell)
+        self.assertFalse(restarted)
+        kill.assert_not_called()
+
+    def test_a_session_that_could_not_be_relaunched_is_left_running(self):
+        for name in ("missing folder", "closed workstream", "missing agent"):
+            with self.subTest(name):
+                key = self.claude_terminal(key="term-" + name.replace(" ", "-"))
+                original = dict(self.parent, metadata=dict(self.parent["metadata"]))
+                if name == "missing folder":
+                    self.parent["metadata"]["folder"] = str(self.root / "gone")
+                if name == "closed workstream":
+                    self.parent["status"] = "closed"
+                which = (lambda tool: None if tool == "claude" else "/bin/" + tool) if name == "missing agent" else None
+                with patch.object(streams.shutil, "which", side_effect=which or (lambda tool: "/bin/" + tool)), \
+                     patch.object(streams.Path, "is_socket", lambda path: path.name == key), \
+                     patch.object(streams, "session_processes", return_value=([4001], {4001: 0})), \
+                     patch.object(streams, "inherited_no_color", return_value=True), \
+                     patch.object(streams.os, "kill") as kill, patch.object(streams, "run") as run:
+                    self.assertFalse(streams.refresh_terminal(key))
+                kill.assert_not_called()
+                run.assert_not_called()
+                self.parent.clear()
+                self.parent.update(original)
+
+    def test_stopping_waits_for_the_agent_and_escalates_without_touching_helpers(self):
+        # The agent ignores SIGHUP until it is killed; the MCP helper below it never exits.
+        alive = {4001: 3, 4002: 3, 4003: float("inf"), 4004: float("inf")}
+        def process_alive(pid):
+            alive[pid] -= 1
+            return alive[pid] > 0
+        def deliver(pid, sig):
+            if sig == streams.signal.SIGKILL:
+                alive[pid] = 0
+        with patch.object(streams.os, "kill", side_effect=deliver) as kill, \
+             patch.object(streams, "process_alive", side_effect=process_alive):
+            streams.stop_session(([4001], {4001: 0, 4002: 1, 4003: 2, 4004: 3}), timeout=0.05)
+        signals = [c.args for c in kill.call_args_list]
+        self.assertEqual(signals[0], (4001, streams.signal.SIGTERM))
+        self.assertIn((4003, streams.signal.SIGKILL), signals)
+        self.assertNotIn(4004, [pid for pid, _ in signals])
+
+    def test_no_color_is_read_from_the_dtach_environment(self):
+        def ps(command, **options):
+            text = "dtach -n /tmp/s -r winch claude TERM=xterm NO_COLOR=1" if command[-1] == "7" else "dtach -n /tmp/s TERM=xterm"
+            return subprocess.CompletedProcess(command, 0, text, "")
+        with patch.object(streams.subprocess, "run", side_effect=ps):
+            self.assertTrue(streams.inherited_no_color(([7], {})))
+            self.assertFalse(streams.inherited_no_color(([8], {})))
+
+    def test_only_a_finished_quiet_transcript_counts_as_idle(self):
+        self.assertTrue(streams.transcript_idle(self.finished_transcript()))
+        self.assertFalse(streams.transcript_idle(self.finished_transcript(age=0)))
+        self.assertFalse(streams.transcript_idle(self.transcript(
+            {"type": "assistant", "message": {"stop_reason": "end_turn"}}, {"type": "user", "message": {"content": "next"}})))
+        self.assertTrue(streams.transcript_idle(self.transcript(
+            {"type": "assistant", "message": {"stop_reason": "end_turn"}},
+            {"type": "user", "isSidechain": True, "message": {"content": "subagent"}})))
+        self.assertFalse(streams.transcript_idle(self.root / "missing.jsonl"))
+
+    def soul(self, transcript_age):
+        config = self.root / "claude-config"
+        folder = self.root / "manager" / "terminal"
+        sid = str(streams.uuid.uuid5(streams.uuid.NAMESPACE_URL, folder.as_uri()))
+        project = config / "projects" / "manager-terminal"
+        project.mkdir(parents=True, exist_ok=True)
+        saved = project / (sid + ".jsonl")
+        self.finished_transcript(age=transcript_age).rename(saved)
+        self.live.add("meridian-soul-claude")
+        processes = ([5001], {5001: 0, 5002: 1})
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(config)), \
+             patch.object(streams.shutil, "which", side_effect=lambda tool: tool), \
+             patch.object(streams, "session_processes", return_value=processes), \
+             patch.object(streams, "inherited_no_color", return_value=True), \
+             patch.object(streams, "stop_session") as stop, patch.object(streams, "run") as run:
+            path = streams.manager_terminal()
+        return sid, path, stop, run
+
+    def test_idle_soul_without_colors_is_resumed(self):
+        sid, path, stop, run = self.soul(transcript_age=60)
+        stop.assert_called_once()
+        args = run.call_args.args[0]
+        self.assertEqual(args[2], str(path))
+        self.assertEqual(args[args.index("--resume") + 1], sid)
+
+    def test_busy_soul_is_only_reattached(self):
+        _, path, stop, run = self.soul(transcript_age=0)
+        self.assertEqual(path.name, "meridian-soul-claude")
+        stop.assert_not_called()
+        run.assert_not_called()
 
     def test_claude_resume_uses_only_its_own_transcript(self):
         key = self.register(provider="claude")

@@ -231,12 +231,21 @@ struct StreamTerminal: View {
     var onDisconnect: (() -> Void)? = nil
     var onRequestClose: (() -> Void)? = nil
     var sessionIdentity: String = ""
+    /// Lets the bridge restart an idle agent whose session cannot show colors before the pane connects.
+    var refreshBeforeConnect = false
+    @State private var refreshed = false
 
     var body: some View {
         Group {
         if disconnected {
             Button("Reconnect terminal") { disconnected = false }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if refreshBeforeConnect, socket != nil, !refreshed {
+            Color.clear.task {
+                // Connect regardless: a failed check leaves the session as it was.
+                _ = try? await Bridge.run(["refresh-terminal", streamID])
+                refreshed = true
+            }
         } else {
             ConnectedTerminal(options: self) {
                 disconnected = true
@@ -670,7 +679,8 @@ struct Dashboard: View {
                                                        isCodex: entry.provider == "codex", visible: visible,
                                                        onDisconnect: { terminalDisconnected(entry) },
                                                        onRequestClose: { closeTerminal(entry, in: stream) },
-                                                       sessionIdentity: entry.session ?? entry.provider)
+                                                       sessionIdentity: entry.session ?? entry.provider,
+                                                       refreshBeforeConnect: true)
                                             .id(entry.id)
                                             .opacity(visible ? 1 : 0)
                                             .allowsHitTesting(visible)
