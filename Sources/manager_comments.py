@@ -51,6 +51,8 @@ def github_error(exc):
 
 
 REVIEW_REQUEST = 'github:review-request:'
+LINEAR_DRAFT = ('Linear syncs to Slack: draft any Linear reply for the owner to approve '
+                'instead of posting it yourself.')
 LINEAR = re.compile(r'https://linear\.app/(?:[\w-]+/)?issue/([a-z][a-z0-9]*-\d+)', re.I)
 
 
@@ -492,6 +494,8 @@ def follow_up(bridge, rows, transaction, brain, untrusted, act_one, exclude=None
             continue
         conflict = item.get('kind') == 'conflict'
         message = str(plan['message']) + ('\n\nPR: ' if conflict else '\n\nComment: ') + item['url']
+        if identity(item.get('target')).startswith('linear:'):
+            message += '\n\n' + LINEAR_DRAFT
         if not matches and conflict:
             fresh = open_stream(bridge, rows, transaction, item)
             if fresh is None:

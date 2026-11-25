@@ -702,5 +702,67 @@ class ConversationTailTests(unittest.TestCase):
         self.assertTrue(text.endswith("Agent: caf\u00e9 newest"))
 
 
+class LinearOwnerApprovalTests(Fixture):
+    WRITES = ("mcp__plugin_linear_linear__save_comment", "mcp__linear__create_comment",
+              "mcp__claude_ai_Linear__save_issue", "mcp__plugin_linear_linear__save_status_update")
+    READS = ("mcp__plugin_linear_linear__get_issue", "mcp__plugin_linear_linear__list_comments",
+             "mcp__plugin_linear_linear__search_documentation", "mcp__plugin_linear_linear__extract_images",
+             "mcp__plugin_linear_linear__whoami")
+
+    def held(self, **fields):
+        return manager.review(self.bridge, "t1", "s", self.event("PreToolUse", **fields))
+
+    def assert_held(self, outcome):
+        self.assertEqual(outcome.output["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("Linear", outcome.output["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(outcome.state, "Needs you")
+
+    def test_linear_writes_wait_for_the_owner(self):
+        for tool in self.WRITES:
+            with self.subTest(tool=tool):
+                self.assert_held(self.held(tool_name=tool, tool_input={"issueId": "ABC-1", "body": "Done"}))
+        self.consult.assert_not_called()
+
+    def test_linear_reads_and_github_writes_are_left_alone(self):
+        for tool in self.READS + ("mcp__plugin_github_github__add_issue_comment", "Bash"):
+            with self.subTest(tool=tool):
+                self.assertEqual(self.held(tool_name=tool, tool_input={"command": "gh pr comment 1 -b hi"}),
+                                 manager.NOTHING)
+
+    def test_bash_calls_to_the_linear_api_or_bridge_posts_wait_for_the_owner(self):
+        for command in ("curl -s https://api.linear.app/graphql -d @body.json",
+                        "python3 streams.py linear-ask mx-1 4", "python3 streams.py linear-share mx-1 pr a b"):
+            with self.subTest(command=command):
+                self.assert_held(self.held(tool_name="Bash", tool_input={"command": command}))
+        for command in ("python3 streams.py linear-context mx-1", "grep -n 'linear-ask\\|api.linear.app' Sources/*.py",
+                        "git commit -m 'Hold linear-share posts'"):
+            with self.subTest(command=command):
+                self.assertEqual(self.held(tool_name="Bash", tool_input={"command": command}), manager.NOTHING)
+
+    def test_linear_tools_behind_other_servers_wait_for_the_owner(self):
+        self.assert_held(self.held(tool_name="mcp__zapier__linear_create_comment", tool_input={}))
+
+    def test_the_manager_never_approves_a_linear_write(self):
+        tool, tool_input = self.WRITES[0], {"body": "Done"}
+        self.consult.return_value = {"verdict": "allow", "summary": "Fine.", "message": ""}
+        with self.db() as db:
+            store.approve(db, "t1", tool, tool_input)
+        self.assert_held(self.held(tool_name=tool, tool_input=tool_input))
+        for name in ("PermissionRequest", "PermissionDenied"):
+            with self.subTest(event=name):
+                outcome = manager.review(self.bridge, "t1", "s", self.event(
+                    name, tool_name=tool, tool_input=tool_input, permission_mode="auto"))
+                self.assertEqual(outcome, manager.NOTHING)
+        self.consult.assert_not_called()
+
+    def test_linear_writes_wait_while_paused_and_in_subagents(self):
+        with self.db() as db:
+            store.set_setting(db, "paused", "1")
+        self.assertEqual(self.held(tool_name=self.WRITES[0], tool_input={}).output["hookSpecificOutput"]
+                         ["permissionDecision"], "ask")
+        sub = self.held(tool_name=self.WRITES[0], tool_input={}, agent_id="a1")
+        self.assertEqual(sub.output["hookSpecificOutput"]["permissionDecision"], "ask")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -784,6 +784,28 @@ class WorkstreamTerminalsTests(unittest.TestCase):
         self.assertIn('planned steps', out['hookSpecificOutput']['additionalContext'])
         self.assertEqual(out['hookSpecificOutput']['hookEventName'], 'PostToolUse')
 
+    def test_linear_write_waits_for_the_owner_even_from_another_session(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        event = dict(hook_event_name="PreToolUse", tool_name="mcp__linear__save_comment", tool_input={"body": "Hi"})
+        for sid in ("sid", "after-clear"):
+            with self.subTest(session=sid):
+                out = json.loads(self.run_hook(key, "sid", **dict(event, session_id=sid)))
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.review.assert_not_called()
+        self.assertEqual(self.activity(key)[0], "Needs you")
+
+    def test_linear_gate_failure_still_waits_for_the_owner(self):
+        key = self.register(provider="claude", state="Working", sid="sid")
+        with patch.object(streams.manager, "held_for_owner", side_effect=RuntimeError):
+            out = json.loads(self.run_hook(key, "sid", hook_event_name="PreToolUse", tool_name="Bash",
+                                           tool_input={"command": "ls"}))
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+
+    def test_agent_context_keeps_linear_posts_as_drafts(self):
+        context = streams.agent_context(self.parent['id'], "UserPromptSubmit")
+        self.assertIn("Linear", context)
+        self.assertIn("draft", context.lower())
+        self.assertIn("GitHub", context)
 
 class WorktreeCreationTests(unittest.TestCase):
     def setUp(self):
@@ -965,6 +987,7 @@ class WorktreeCreationTests(unittest.TestCase):
         self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
         self.assertEqual(self.git('branch', '--list', 'meridian/*'), '')
         self.assertEqual(list((self.home / 'worktrees').iterdir()), [])
+
 
 
 if __name__ == '__main__':
