@@ -735,14 +735,15 @@ class LinearOwnerApprovalTests(Fixture):
                         "curl https://api.lin\"\"ear.app/graphql",
                         "python3 -c \"import urllib.request as u; u.urlopen('https://API.LINEAR.APP/graphql')\"",
                         "grep -n api.linear.app Sources/*.py",
-                        "security find-generic-password -s local.meridian.linear -a comments -w"):
+                        "security find-generic-password -s local.meridian.linear -a comments -w",
+                        "env -u MERIDIAN_TERMINAL python3 streams.py linear-ask mx-1 4",
+                        "python3 streams.py 'linear-sh'\"are\" mx-1 pr a b"):
             with self.subTest(command=command):
                 self.assert_held(self.held(tool_name="Bash", tool_input={"command": command}))
 
     def test_other_bash_is_left_alone(self):
-        # The bridge refuses agent posts itself, so its command names need no shell match.
-        for command in ("python3 streams.py linear-context mx-1", "python3 streams.py linear-ask mx-1 4",
-                        "git commit -m 'Hold linear-share posts'", "open https://linear.app/acme/issue/ABC-1"):
+        for command in ("python3 streams.py linear-context mx-1", "open https://linear.app/acme/issue/ABC-1",
+                        "gh pr comment 12 -b 'Fixed in the latest push'"):
             with self.subTest(command=command):
                 self.assertEqual(self.held(tool_name="Bash", tool_input={"command": command}), manager.NOTHING)
 

@@ -20,9 +20,10 @@ REVIEWED_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan"}
 # Linear syncs to Slack, so an agent's Linear writes are drafts until the owner approves each one.
 # Unknown Linear tools count as writes; only these read prefixes run without the owner.
 LINEAR_READS = ("get_", "list_", "search_", "extract_", "whoami")
-# Best effort: anything that names the Linear API or Meridian's Linear key, once quotes and
-# line continuations are gone. The bridge refuses agent posts itself; a script file still slips through.
-LINEAR_BASH = re.compile(r"api\.linear\.app|local\.meridian\.linear", re.I)
+# Best effort: anything that names the Linear API, Meridian's Linear key or the bridge's posting
+# commands, once quotes and line continuations are gone. The bridge also refuses agent terminals, but an
+# agent can clear that marker, so both checks stay. A script file still slips through.
+LINEAR_BASH = re.compile(r"api\.linear\.app|local\.meridian\.linear|linear-(?:ask|share)", re.I)
 LINEAR_HELD = ("Linear posts sync to Slack, so Meridian holds every agent write to Linear for your approval. "
                "Check the text before allowing it.")
 TRIGGERS = {"PermissionRequest": "permission", "PermissionDenied": "denied", "Stop": "stop"}
