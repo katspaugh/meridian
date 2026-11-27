@@ -4,6 +4,7 @@ import json
 import fcntl
 from pathlib import Path
 import os
+import random
 import re
 import subprocess
 from urllib.request import Request, urlopen
@@ -139,6 +140,8 @@ CONFLICT_SEARCH = '''query($after: String) {
   }
 }'''
 CONFLICT_PAGES = 10
+# Search results never compute mergeability; requesting a PR on its own starts that computation.
+CONFLICT_PROBES = 10
 # Fixed text only: PR titles and branch names from GitHub never become terminal input.
 CONFLICT_MESSAGE = ('The pull request linked below has merge conflicts with its base branch. Run gh pr view with that '
                     'URL to find its base and head branches. Merge the base branch into the PR head branch, resolve the '
@@ -146,9 +149,28 @@ CONFLICT_MESSAGE = ('The pull request linked below has merge conflicts with its 
                     'worktree is not on that head branch, do not switch away from or discard work in progress here.')
 
 
+def conflict_item(repo, number, sha):
+    key = f'github:conflict:{repo.lower()}#{number}'
+    url = f'https://github.com/{repo}/pull/{number}'
+    return dict(id=f'{key}:{sha}', target=url, url=url, author='', kind='conflict',
+                body='Merge conflict with the base branch.', plan=dict(action='follow', message=CONFLICT_MESSAGE))
+
+
+def probe(repo, number):
+    """Request one PR, so GitHub computes its mergeability. Returns True, False or None while still unknown."""
+    try:
+        pull = gh(f'repos/{repo}/pulls/{number}')
+    except Exception:
+        return None, ''  # Retried on the next poll; one inaccessible PR must not fail the others.
+    if not isinstance(pull, dict) or pull.get('state') != 'open' or type(pull.get('mergeable')) is not bool:
+        return None, ''
+    sha = (pull.get('head') or {}).get('sha') or ''
+    return pull['mergeable'], sha if isinstance(sha, str) else ''
+
+
 def conflicts(scope=None):
     """Return conflicting authored PRs as inbox items, and the PRs whose mergeability GitHub has not computed."""
-    items, unknown, after = [], set(), None
+    items, unknown, after, waiting = [], set(), None, []
     for _ in range(CONFLICT_PAGES):
         search = graphql(CONFLICT_SEARCH, dict(after=after)).get('search') or {}
         for pull in search.get('nodes') or []:
@@ -161,16 +183,24 @@ def conflicts(scope=None):
             key = f'github:conflict:{repo.lower()}#{number}'
             if pull.get('mergeable') == 'UNKNOWN':
                 unknown.add(key)
+                waiting.append((key, repo, number))
             if pull.get('mergeable') != 'CONFLICTING' or not re.fullmatch(r'[0-9a-f]{40,64}', sha):
                 continue
-            url = f'https://github.com/{repo}/pull/{number}'
-            items.append(dict(id=f'{key}:{sha}', target=url, url=url, author='', kind='conflict',
-                              body='Merge conflict with the base branch.',
-                              plan=dict(action='follow', message=CONFLICT_MESSAGE)))
+            items.append(conflict_item(repo, number, sha))
         page = search.get('pageInfo') or {}
         if not page.get('hasNextPage') or not page.get('endCursor') or page['endCursor'] == after:
             break
         after = page['endCursor']
+    # A random sample, so every waiting PR is requested within a few polls however many there are.
+    for key, repo, number in random.sample(waiting, min(len(waiting), CONFLICT_PROBES)):
+        mergeable, sha = probe(repo, number)
+        if mergeable is None:
+            continue
+        if mergeable is False:
+            if not re.fullmatch(r'[0-9a-f]{40,64}', sha):
+                continue
+            items.append(conflict_item(repo, number, sha))
+        unknown.discard(key)
     return items, unknown
 
 

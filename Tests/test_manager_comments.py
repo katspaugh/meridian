@@ -385,6 +385,10 @@ class ConflictTests(Fixture):
         with self.db() as db:
             store.set_setting(db, 'watch_comments', '1')
         self.bridge.open_github_stream = Mock(side_effect=AssertionError('no workstream should be created'))
+        # A PR requested on its own, whose mergeability GitHub has not finished computing.
+        probe = patch.object(comments, 'gh', return_value=dict(state='open', mergeable=None, head=dict(sha=SHA)))
+        self.gh = probe.start()
+        self.addCleanup(probe.stop)
 
     def poll(self, *pages):
         with patch.object(comments, 'graphql', side_effect=list(pages)):
@@ -425,6 +429,38 @@ class ConflictTests(Fixture):
         self.assertEqual(len(self.pending()), 1, 'unknown mergeability is never treated as resolved')
         self.poll(page(node('MERGEABLE')))
         self.assertEqual(self.pending(), [])
+
+    def test_unknown_prs_are_requested_on_their_own_and_known_results_are_used(self):
+        head = 'd' * 40
+        answers = {'repos/o/r/pulls/14': dict(state='open', mergeable=False, mergeable_state='dirty', head=dict(sha=head)),
+                   'repos/o/r/pulls/15': dict(state='open', mergeable=None, head=dict(sha=SHA))}
+        self.gh.side_effect = lambda path: answers[path]
+        with patch.object(comments, 'graphql', return_value=page(node('UNKNOWN', number=14), node('UNKNOWN', number=15))):
+            items, unknown = comments.conflicts()
+        self.assertEqual(sorted(call.args[0] for call in self.gh.call_args_list), sorted(answers))
+        self.assertEqual([i['id'] for i in items], ['github:conflict:o/r#14:' + head])
+        self.assertEqual(items[0]['url'], 'https://github.com/o/r/pull/14')
+        self.assertEqual(unknown, {'github:conflict:o/r#15'})
+
+    def test_a_probe_that_finds_the_pr_mergeable_clears_its_queued_conflict(self):
+        self.poll(page(node()))
+        self.gh.return_value = dict(state='open', mergeable=True, mergeable_state='clean', head=dict(sha=SHA))
+        self.poll(page(node('UNKNOWN')))
+        self.assertEqual(self.pending(), [])
+
+    def test_probes_are_capped_per_poll_and_the_rest_stay_unknown(self):
+        nodes = [node('UNKNOWN', number=n) for n in range(100, 100 + comments.CONFLICT_PROBES + 5)]
+        with patch.object(comments, 'graphql', return_value=page(*nodes)):
+            items, unknown = comments.conflicts()
+        self.assertEqual(self.gh.call_count, comments.CONFLICT_PROBES)
+        self.assertEqual((items, len(unknown)), ([], len(nodes)))
+
+    def test_a_failed_probe_keeps_the_pr_unknown_without_failing_the_poll(self):
+        self.poll(page(node()))
+        self.gh.side_effect = comments.GitHubFailure('network')
+        self.poll(page(node('UNKNOWN')))
+        self.assertEqual(len(self.pending()), 1)
+        self.assertEqual(self.setting('comments_error_conflicts'), '')
 
     def test_unrelated_comments_survive_conflict_cleanup(self):
         with self.db() as db:
